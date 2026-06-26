@@ -40,6 +40,11 @@ struct filter_data {
 	std::unordered_map<uint64_t, FaceStatus> faceStatusCache;
 	std::vector<std::vector<float>> referenceFaceFeatures;
 
+	gs_texture_t *previewTexture = nullptr;
+	gs_texture_t *renderMaskTexture = nullptr;
+	uint32_t lastTexWidth = 0;
+	uint32_t lastTexHeight = 0;
+
 	std::unique_ptr<yunet::YuNetONNX> yunetModel;
 	std::unique_ptr<sface::SFaceONNX> sfaceModel;
 	bool maskingEnabled;

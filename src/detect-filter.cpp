@@ -1328,26 +1328,31 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 	}
 
 	if (!tf->saveDetectionsPath.empty()) {
-		std::ofstream detectionsFile(tf->saveDetectionsPath);
-		if (detectionsFile.is_open()) {
-			nlohmann::json j;
-			for (const Object &obj : objects) {
-				nlohmann::json obj_json;
-				obj_json["label"] = obj.label;
-				obj_json["confidence"] = obj.prob;
-				obj_json["rect"] = {{"x", obj.rect.x},
-						    {"y", obj.rect.y},
-						    {"width", obj.rect.width},
-						    {"height", obj.rect.height}};
-				obj_json["id"] = obj.id;
-				j.push_back(obj_json);
-			}
-			detectionsFile << j.dump(4);
-			detectionsFile.close();
-		} else {
-			obs_log(LOG_ERROR, "Failed to open file for writing detections: %s",
-				tf->saveDetectionsPath.c_str());
+		std::string savePath = tf->saveDetectionsPath;
+		nlohmann::json j;
+		for (const Object &obj : objects) {
+			nlohmann::json obj_json;
+			obj_json["label"] = obj.label;
+			obj_json["confidence"] = obj.prob;
+			obj_json["rect"] = {{"x", obj.rect.x},
+					    {"y", obj.rect.y},
+					    {"width", obj.rect.width},
+					    {"height", obj.rect.height}};
+			obj_json["id"] = obj.id;
+			j.push_back(obj_json);
 		}
+		std::string jsonStr = j.dump(4);
+		
+		std::thread([savePath, jsonStr]() {
+			std::ofstream detectionsFile(savePath);
+			if (detectionsFile.is_open()) {
+				detectionsFile << jsonStr;
+				detectionsFile.close();
+			} else {
+				obs_log(LOG_ERROR, "Failed to open file for writing detections: %s",
+					savePath.c_str());
+			}
+		}).detach();
 	}
 
 	if (tf->preview || tf->maskingEnabled || tf->debugMode) {
@@ -1476,6 +1481,12 @@ void detect_filter_destroy(void *data)
 		gs_texrender_destroy(tf->texrender);
 		if (tf->stagesurface) {
 			gs_stagesurface_destroy(tf->stagesurface);
+		}
+		if (tf->previewTexture) {
+			gs_texture_destroy(tf->previewTexture);
+		}
+		if (tf->renderMaskTexture) {
+			gs_texture_destroy(tf->renderMaskTexture);
 		}
 		gs_effect_destroy(tf->kawaseBlurEffect);
 		gs_effect_destroy(tf->maskingEffect);
@@ -1696,15 +1707,20 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 		bool destroy_tex = false;
 		
 		if (tf->preview || tf->debugMode) {
-			tex = gs_texture_create(width, height, GS_BGRA, 1,
-						      (const uint8_t **)&outputBGRA.data, 0);
-			destroy_tex = true;
+			if (!tf->previewTexture || tf->lastTexWidth != width || tf->lastTexHeight != height) {
+				if (tf->previewTexture) gs_texture_destroy(tf->previewTexture);
+				tf->previewTexture = gs_texture_create(width, height, GS_BGRA, 1,
+							      (const uint8_t **)&outputBGRA.data, 0);
+			} else {
+				gs_texture_set_image(tf->previewTexture, outputBGRA.data, width * 4, false);
+			}
+			tex = tf->previewTexture;
+			destroy_tex = false; // It's cached now
 		} else {
 			tex = gs_texrender_get_texture(tf->texrender);
 			destroy_tex = false;
 		}
 
-		gs_texture_t *maskTexture = nullptr;
 		std::string technique_name = "Draw";
 		gs_eparam_t *imageParam = gs_effect_get_param_by_name(tf->maskingEffect, "image");
 		gs_eparam_t *maskParam =
@@ -1713,18 +1729,21 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 			gs_effect_get_param_by_name(tf->maskingEffect, "color");
 
 		if (tf->maskingEnabled) {
-			maskTexture = gs_texture_create(width, height, GS_R8, 1,
-							(const uint8_t **)&outputMask.data, 0);
-			gs_effect_set_texture(maskParam, maskTexture);
+			if (!tf->renderMaskTexture || tf->lastTexWidth != width || tf->lastTexHeight != height) {
+				if (tf->renderMaskTexture) gs_texture_destroy(tf->renderMaskTexture);
+				tf->renderMaskTexture = gs_texture_create(width, height, GS_R8, 1,
+								(const uint8_t **)&outputMask.data, 0);
+			} else {
+				gs_texture_set_image(tf->renderMaskTexture, outputMask.data, width, false);
+			}
+			gs_effect_set_texture(maskParam, tf->renderMaskTexture);
 			if (tf->maskingType == "output_mask") {
 				technique_name = "DrawMask";
 			} else if (tf->maskingType == "blur") {
-				if (destroy_tex) gs_texture_destroy(tex);
-				tex = blur_image(tf, width, height, maskTexture);
-				destroy_tex = true;
+				tex = blur_image(tf, width, height, tf->renderMaskTexture);
+				destroy_tex = true; // blur_image creates a new texture
 			} else if (tf->maskingType == "pixelate") {
-				if (destroy_tex) gs_texture_destroy(tex);
-				tex = pixelate_image(tf, width, height, maskTexture,
+				tex = pixelate_image(tf, width, height, tf->renderMaskTexture,
 						     (float)tf->maskingBlurRadius);
 				destroy_tex = true;
 			} else if (tf->maskingType == "transparent") {
@@ -1745,10 +1764,13 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 		if (destroy_tex) {
 			gs_texture_destroy(tex);
 		}
-		if (maskTexture) {
-			gs_texture_destroy(maskTexture);
-		}
+		
+		tf->lastTexWidth = width;
+		tf->lastTexHeight = height;
 	} else {
+		// Just render the original video
+		gs_texture_t *tex = gs_texrender_get_texture(tf->texrender);
+		gs_effect_t *default_effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
 		obs_source_skip_video_filter(tf->source);
 	}
 	return;
