@@ -90,6 +90,7 @@ target_sources(
           src/ort-model/ONNXRuntimeModel.cpp
           src/edgeyolo/edgeyolo_onnxruntime.cpp
           src/sort/Sort.cpp
-          src/yunet/YuNet.cpp)
+          src/yunet/YuNet.cpp
+          src/sface/SFace.cpp)
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})

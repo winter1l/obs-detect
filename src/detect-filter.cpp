@@ -179,10 +179,13 @@ obs_properties_t *detect_filter_properties(void *data)
 					OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
 	set_class_names_on_object_category(object_category, edgeyolo_cpp::COCO_CLASSES);
 
-	obs_property_t *face_category =
-		obs_properties_add_list(props, "face_category", obs_module_text("FaceCategory"),
-					OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-	set_class_names_on_object_category(face_category, edgeyolo_cpp::COCO_CLASSES);
+	obs_property_t *reference_face_path =
+		obs_properties_add_path(props, "reference_face_path", obs_module_text("ReferenceFaceImage"),
+					OBS_PATH_FILE, "Image files (*.png *.jpg *.jpeg *.bmp);;All files (*.*)", nullptr);
+					
+	obs_property_t *face_match_threshold =
+		obs_properties_add_float_slider(props, "face_match_threshold", obs_module_text("FaceMatchThreshold"),
+						0.0, 1.0, 0.01);
 
 	obs_property_t *person_category =
 		obs_properties_add_list(props, "person_category", obs_module_text("PersonCategory"),
@@ -361,7 +364,8 @@ obs_properties_t *detect_filter_properties(void *data)
 
 	obs_property_set_modified_callback(enable_face_exclusion, [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
 		const bool enabled = obs_data_get_bool(settings, "enable_face_exclusion") && obs_data_get_bool(settings, "advanced");
-		obs_property_set_visible(obs_properties_get(props_, "face_category"), enabled);
+		obs_property_set_visible(obs_properties_get(props_, "reference_face_path"), enabled);
+		obs_property_set_visible(obs_properties_get(props_, "face_match_threshold"), enabled);
 		obs_property_set_visible(obs_properties_get(props_, "person_category"), enabled);
 		obs_property_set_visible(obs_properties_get(props_, "min_face_area_ratio"), enabled);
 		return true;
@@ -558,7 +562,8 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_string(settings, "model_size", "small");
 	obs_data_set_default_int(settings, "object_category", -1);
 	obs_data_set_default_bool(settings, "enable_face_exclusion", false);
-	obs_data_set_default_int(settings, "face_category", -1);
+	obs_data_set_default_string(settings, "reference_face_path", "");
+	obs_data_set_default_double(settings, "face_match_threshold", 0.36);
 	obs_data_set_default_int(settings, "person_category", -1);
 	obs_data_set_default_double(settings, "min_face_area_ratio", 30.0);
 	obs_data_set_default_bool(settings, "masking_group", false);
@@ -593,7 +598,13 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	tf->conf_threshold = (float)obs_data_get_double(settings, "threshold");
 	tf->objectCategory = (int)obs_data_get_int(settings, "object_category");
 	tf->enableFaceExclusion = obs_data_get_bool(settings, "enable_face_exclusion");
-	tf->faceCategory = (int)obs_data_get_int(settings, "face_category");
+	const char *ref_path = obs_data_get_string(settings, "reference_face_path");
+	if (ref_path && strlen(ref_path) > 0) {
+		tf->referenceFacePath = ref_path;
+	} else {
+		tf->referenceFacePath = "";
+	}
+	tf->faceMatchThreshold = (float)obs_data_get_double(settings, "face_match_threshold");
 	tf->personCategory = (int)obs_data_get_int(settings, "person_category");
 	tf->minFaceAreaRatio = (float)obs_data_get_double(settings, "min_face_area_ratio");
 	tf->maskingEnabled = obs_data_get_bool(settings, "masking_group");
@@ -810,6 +821,72 @@ void detect_filter_update(void *data, obs_data_t *settings)
 		}
 	}
 
+	// Load face recognition models if enabled
+	if (tf->enableFaceExclusion) {
+		try {
+			char *yunet_raw = obs_module_file("models/face_detection_yunet_2023mar.onnx");
+			char *sface_raw = obs_module_file("models/face_recognition_sface_2021dec.onnx");
+			
+			if (yunet_raw && sface_raw) {
+#ifdef _WIN32
+				int y_len = MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, yunet_raw, -1, nullptr, 0);
+				std::wstring y_wstr(y_len, L'\0');
+				MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, yunet_raw, -1, y_wstr.data(), y_len);
+				
+				int s_len = MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, sface_raw, -1, nullptr, 0);
+				std::wstring s_wstr(s_len, L'\0');
+				MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, sface_raw, -1, s_wstr.data(), s_len);
+				
+				tf->yunetModel = std::make_unique<yunet::YuNetONNX>(y_wstr, 1, 50, 1, "cpu", 0, false, 0.45f, 0.5f);
+				tf->sfaceModel = std::make_unique<sface::SFaceONNX>(s_wstr, 1, 1, "cpu", 0, false);
+#else
+				tf->yunetModel = std::make_unique<yunet::YuNetONNX>(std::string(yunet_raw), 1, 50, 1, "cpu", 0, false, 0.45f, 0.5f);
+				tf->sfaceModel = std::make_unique<sface::SFaceONNX>(std::string(sface_raw), 1, 1, "cpu", 0, false);
+#endif
+			}
+			if (yunet_raw) bfree(yunet_raw);
+			if (sface_raw) bfree(sface_raw);
+
+			// Pre-calculate reference face feature
+			if (!tf->referenceFacePath.empty() && tf->yunetModel && tf->sfaceModel) {
+#ifdef _WIN32
+				int p_len = MultiByteToWideChar(CP_UTF8, 0, tf->referenceFacePath.c_str(), -1, nullptr, 0);
+				std::wstring p_wstr(p_len, L'\0');
+				MultiByteToWideChar(CP_UTF8, 0, tf->referenceFacePath.c_str(), -1, p_wstr.data(), p_len);
+				// cv::imread with wstring is not standard, we must use utf8 path or convert for imread if possible.
+				// OpenCV 4+ imread handles UTF8 on Windows. Let's just use the string.
+#endif
+				cv::Mat refImg = cv::imread(tf->referenceFacePath, cv::IMREAD_COLOR);
+				if (!refImg.empty()) {
+					std::vector<Object> faces = tf->yunetModel->inference(refImg);
+					if (!faces.empty()) {
+						tf->referenceFaceFeature = tf->sfaceModel->inference(refImg, faces[0].landmarks);
+						obs_log(LOG_INFO, "Reference face loaded and feature extracted successfully.");
+					} else {
+						obs_log(LOG_WARNING, "No face detected in reference image.");
+						tf->referenceFaceFeature.clear();
+					}
+				} else {
+					obs_log(LOG_WARNING, "Could not read reference face image: %s", tf->referenceFacePath.c_str());
+					tf->referenceFaceFeature.clear();
+				}
+			} else {
+				tf->referenceFaceFeature.clear();
+			}
+		} catch (const std::exception &e) {
+			obs_log(LOG_ERROR, "Failed to load face recognition models: %s", e.what());
+			tf->yunetModel.reset();
+			tf->sfaceModel.reset();
+			tf->referenceFaceFeature.clear();
+		}
+	} else {
+		tf->yunetModel.reset();
+		tf->sfaceModel.reset();
+		tf->referenceFaceFeature.clear();
+		tf->faceStatusCache.clear();
+		tf->faceExemptIds.clear();
+	}
+
 	// update threshold on edgeyolo
 	if (tf->onnxruntimemodel) {
 		tf->onnxruntimemodel->setBBoxConfThresh(tf->conf_threshold);
@@ -876,6 +953,7 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 		tf->isInferencing = false;
 		return;
 	}
+	tf->frameCount++;
 		auto start_time = std::chrono::high_resolution_clock::now();
 
 		cv::Mat inferenceFrame;
@@ -941,16 +1019,7 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 		objects = filtered_objects;
 	}
 
-	std::vector<cv::Rect_<float>> valid_faces;
-	if (tf->enableFaceExclusion && tf->faceCategory != -1 && tf->personCategory != -1) {
-		float screenArea = (float)(imageBGRA.cols * imageBGRA.rows);
-		float minFaceAreaPixels = screenArea * (tf->minFaceAreaRatio / 100.0f);
-		for (const Object &obj : objects) {
-			if (obj.label == tf->faceCategory && obj.rect.area() >= minFaceAreaPixels) {
-				valid_faces.push_back(obj.rect);
-			}
-		}
-	}
+
 
 	if (tf->objectCategory != -1) {
 		std::vector<Object> filtered_objects;
@@ -970,26 +1039,66 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 
 	std::vector<Object> all_objects; // for preview
 
-	if (tf->enableFaceExclusion && tf->sortTracking && tf->faceCategory != -1 && tf->personCategory != -1) {
+	if (tf->enableFaceExclusion && tf->sortTracking && tf->personCategory != -1 && tf->yunetModel && tf->sfaceModel && !tf->referenceFaceFeature.empty()) {
 		std::unordered_set<uint64_t> current_ids;
+		float screenArea = (float)(imageBGRA.cols * imageBGRA.rows);
+		float minPersonAreaPixels = screenArea * (tf->minFaceAreaRatio / 100.0f); // use as min person size to save perf
+
 		for (Object &obj : objects) {
 			current_ids.insert(obj.id);
 			if (obj.label != tf->personCategory) continue;
-			
-			for (const auto &face_rect : valid_faces) {
-				cv::Point2f face_center(face_rect.x + face_rect.width / 2.0f, face_rect.y + face_rect.height / 2.0f);
-				cv::Rect_<float> upper_body_rect(obj.rect.x, obj.rect.y, obj.rect.width, obj.rect.height * 0.4f);
-				if (upper_body_rect.contains(face_center)) {
+
+			// Check Cache
+			if (tf->faceStatusCache.count(obj.id)) {
+				if (tf->faceStatusCache[obj.id] == filter_data::FaceStatus::IS_ME) {
 					tf->faceExemptIds.insert(obj.id);
-					break;
 				}
+				continue; // Skip YuNet if already checked
+			}
+
+			// Throttle and Size Check
+			if (tf->frameCount % 10 == 0 && obj.rect.area() >= minPersonAreaPixels) {
+				// Crop Upper Body (approx 40% of height)
+				cv::Rect_<float> upper_body_rect(obj.rect.x, obj.rect.y, obj.rect.width, obj.rect.height * 0.4f);
+				
+				// Ensure within image bounds
+				cv::Rect crop_rect = upper_body_rect & cv::Rect_<float>(0, 0, (float)imageBGRA.cols, (float)imageBGRA.rows);
+				if (crop_rect.width > 0 && crop_rect.height > 0) {
+					cv::Mat cropped = imageBGRA(crop_rect);
+					
+					std::vector<Object> faces = tf->yunetModel->inference(cropped);
+					bool is_me = false;
+					if (!faces.empty()) {
+						std::vector<float> feat = tf->sfaceModel->inference(cropped, faces[0].landmarks);
+						float sim = sface::SFaceONNX::match(feat, tf->referenceFaceFeature);
+						if (sim >= tf->faceMatchThreshold) {
+							is_me = true;
+						}
+					}
+					
+					if (is_me) {
+						tf->faceStatusCache[obj.id] = filter_data::FaceStatus::IS_ME;
+						tf->faceExemptIds.insert(obj.id);
+					} else {
+						tf->faceStatusCache[obj.id] = filter_data::FaceStatus::NOT_ME;
+					}
+				}
+			} else if (!tf->faceStatusCache.count(obj.id)) {
+				tf->faceStatusCache[obj.id] = filter_data::FaceStatus::UNKNOWN;
 			}
 		}
 		
-		// Cleanup lost tracks from faceExemptIds
+		// Cleanup lost tracks from cache and faceExemptIds
 		for (auto it = tf->faceExemptIds.begin(); it != tf->faceExemptIds.end();) {
 			if (!current_ids.count(*it)) {
 				it = tf->faceExemptIds.erase(it);
+			} else {
+				++it;
+			}
+		}
+		for (auto it = tf->faceStatusCache.begin(); it != tf->faceStatusCache.end();) {
+			if (!current_ids.count(it->first)) {
+				it = tf->faceStatusCache.erase(it);
 			} else {
 				++it;
 			}
@@ -1099,18 +1208,7 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 						obj.isExempt = true;
 					}
 				}
-				if (tf->enableFaceExclusion && tf->faceCategory != -1 && tf->personCategory != -1) {
-					if (obj.label == tf->personCategory) {
-						for (const auto &face_rect : valid_faces) {
-							cv::Point2f face_center(face_rect.x + face_rect.width / 2.0f, face_rect.y + face_rect.height / 2.0f);
-							cv::Rect_<float> upper_body_rect(obj.rect.x, obj.rect.y, obj.rect.width, obj.rect.height * 0.4f);
-							if (upper_body_rect.contains(face_center)) {
-								obj.isExempt = true;
-								break;
-							}
-						}
-					}
-				}
+
 				if (obj.isExempt) {
 					exempt_candidates.push_back(&obj);
 				}
@@ -1261,6 +1359,7 @@ void *detect_filter_create(obs_data_t *settings, obs_source_t *source)
 	tf->source = source;
 	tf->texrender = gs_texrender_create(GS_BGRA, GS_ZS_NONE);
 	tf->lastDetectedObjectId = -1;
+	tf->frameCount = 0;
 
 	std::vector<std::tuple<const char *, gs_effect_t **>> effects = {
 		{KAWASE_BLUR_EFFECT_PATH, &tf->kawaseBlurEffect},

@@ -23,6 +23,7 @@ struct Object {
 	int hitFrames = 0;
 	bool isExempt = false;
 	bool isUnconfirmed = false;
+	cv::Point2f landmarks[5];
 };
 
 struct GridAndStride {

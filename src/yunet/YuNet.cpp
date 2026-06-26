@@ -43,6 +43,10 @@ std::vector<Object> YuNetONNX::inference(const cv::Mat &frame)
 		obj.rect.y = obj.rect.y / scale;
 		obj.rect.width = obj.rect.width / scale;
 		obj.rect.height = obj.rect.height / scale;
+		for(int n = 0; n < 5; ++n) {
+			obj.landmarks[n].x /= scale;
+			obj.landmarks[n].y /= scale;
+		}
 	}
 
 	return objects;
@@ -61,13 +65,13 @@ std::vector<Object> YuNetONNX::postProcess(const std::vector<Ort::Value> &result
 		const Ort::Value &cls = result[i];
 		const Ort::Value &obj = result[i + this->strides.size() * 1];
 		const Ort::Value &bbox = result[i + this->strides.size() * 2];
-		// const Ort::Value &kps = result[i + this->strides.size() * 3];
+		const Ort::Value &kps = result[i + this->strides.size() * 3];
 
 		// Decode from predictions
 		const float *cls_v = cls.GetTensorData<float>();
 		const float *obj_v = obj.GetTensorData<float>();
 		const float *bbox_v = bbox.GetTensorData<float>();
-		// const float *kps_v = kps.GetTensorData<float>();
+		const float *kps_v = kps.GetTensorData<float>();
 
 		for (int r = 0; r < rows; ++r) {
 			for (int c = 0; c < cols; ++c) {
@@ -95,11 +99,11 @@ std::vector<Object> YuNetONNX::postProcess(const std::vector<Ort::Value> &result
 				face.rect = cv::Rect2f(x1, y1, w, h);
 				face.label = 0;
 
-				// TODO Get landmarks
-				// for(int n = 0; n < 5; ++n) {
-				//     face.at<float>(0, 4 + 2 * n) = (kps_v[idx * 10 + 2 * n] + c) * strides[i];
-				//     face.at<float>(0, 4 + 2 * n + 1) = (kps_v[idx * 10 + 2 * n + 1]+ r) * strides[i];
-				// }
+				// Get landmarks
+				for(int n = 0; n < 5; ++n) {
+				    face.landmarks[n].x = (kps_v[idx * 10 + 2 * n] + c) * stride;
+				    face.landmarks[n].y = (kps_v[idx * 10 + 2 * n + 1] + r) * stride;
+				}
 
 				faces.push_back(face);
 			}

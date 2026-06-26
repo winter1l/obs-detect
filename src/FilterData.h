@@ -4,6 +4,8 @@
 #include <obs-module.h>
 #include "ort-model/ONNXRuntimeModel.h"
 #include "sort/Sort.h"
+#include "yunet/YuNet.h"
+#include "sface/SFace.h"
 #include <unordered_map>
 #include <unordered_set>
 
@@ -29,9 +31,17 @@ struct filter_data {
 	int minHitFrames;
 	int objectCategory;
 	bool enableFaceExclusion;
-	int faceCategory;
+	std::string referenceFacePath;
+	float faceMatchThreshold;
 	int personCategory;
 	float minFaceAreaRatio;
+
+	enum FaceStatus { UNKNOWN, CHECKING, IS_ME, NOT_ME };
+	std::unordered_map<uint64_t, FaceStatus> faceStatusCache;
+	std::vector<float> referenceFaceFeature;
+
+	std::unique_ptr<yunet::YuNetONNX> yunetModel;
+	std::unique_ptr<sface::SFaceONNX> sfaceModel;
 	bool maskingEnabled;
 	std::string maskingType;
 	int maskingColor;
@@ -95,6 +105,7 @@ struct filter_data {
 	cv::Mat inferenceInputFrame;
 	cv::Rect inferenceCropRect;
 	bool inferenceFrameReady;
+	uint64_t frameCount;
 
 	std::unique_ptr<ONNXRuntimeModel> onnxruntimemodel;
 	std::vector<std::string> classNames;
