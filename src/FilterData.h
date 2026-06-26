@@ -28,6 +28,10 @@ struct filter_data {
 	bool excludeSingleOnly;
 	int minHitFrames;
 	int objectCategory;
+	bool enableFaceExclusion;
+	int faceCategory;
+	int personCategory;
+	float minFaceAreaRatio;
 	bool maskingEnabled;
 	std::string maskingType;
 	int maskingColor;
@@ -54,6 +58,7 @@ struct filter_data {
 	Sort tracker;
 	std::unordered_map<uint64_t, uint64_t> largeFramesCount;
 	std::unordered_set<uint64_t> exemptIds;
+	std::unordered_set<uint64_t> faceExemptIds;
 
 	obs_source_t *source;
 	gs_texrender_t *texrender;

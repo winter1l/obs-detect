@@ -62,7 +62,7 @@ static bool enable_advanced_settings(obs_properties_t *ppts, obs_property_t *p,
 	for (const char *prop_name :
 	     {"threshold", "useGPU", "numThreads", "model_size", "detected_object", "sort_tracking",
 	      "max_unseen_frames", "show_unseen_objects", "save_detections_path", "crop_group",
-	      "min_size_threshold", "min_hit_frames", "enable_exclude"}) {
+	      "min_size_threshold", "min_hit_frames", "enable_exclude", "enable_face_exclusion"}) {
 		p = obs_properties_get(ppts, prop_name);
 		obs_property_set_visible(p, enabled);
 	}
@@ -73,6 +73,14 @@ static bool enable_advanced_settings(obs_properties_t *ppts, obs_property_t *p,
 		p = obs_properties_get(ppts, prop_name);
 		if (p) {
 			obs_property_set_visible(p, exclude_enabled);
+		}
+	}
+
+	bool face_exclude_enabled = enabled && obs_data_get_bool(settings, "enable_face_exclusion");
+	for (const char *prop_name : {"face_category", "person_category", "min_face_area_ratio"}) {
+		p = obs_properties_get(ppts, prop_name);
+		if (p) {
+			obs_property_set_visible(p, face_exclude_enabled);
 		}
 	}
 
@@ -142,6 +150,10 @@ void read_model_config_json_and_set_class_names(const char *model_file, obs_prop
 			std::vector<std::string> labels = j["names"];
 			set_class_names_on_object_category(
 				obs_properties_get(props_, "object_category"), labels);
+			set_class_names_on_object_category(
+				obs_properties_get(props_, "face_category"), labels);
+			set_class_names_on_object_category(
+				obs_properties_get(props_, "person_category"), labels);
 			tf_->classNames = labels;
 		} else {
 			obs_data_set_string(settings, "error",
@@ -166,6 +178,16 @@ obs_properties_t *detect_filter_properties(void *data)
 		obs_properties_add_list(props, "object_category", obs_module_text("ObjectCategory"),
 					OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
 	set_class_names_on_object_category(object_category, edgeyolo_cpp::COCO_CLASSES);
+
+	obs_property_t *face_category =
+		obs_properties_add_list(props, "face_category", obs_module_text("FaceCategory"),
+					OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	set_class_names_on_object_category(face_category, edgeyolo_cpp::COCO_CLASSES);
+
+	obs_property_t *person_category =
+		obs_properties_add_list(props, "person_category", obs_module_text("PersonCategory"),
+					OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	set_class_names_on_object_category(person_category, edgeyolo_cpp::COCO_CLASSES);
 	tf->classNames = edgeyolo_cpp::COCO_CLASSES;
 
 	// options group for masking
@@ -334,6 +356,17 @@ obs_properties_t *detect_filter_properties(void *data)
 
 	obs_property_t *enable_exclude = obs_properties_add_bool(props, "enable_exclude", obs_module_text("EnableExclude"));
 	
+	obs_property_t *enable_face_exclusion = obs_properties_add_bool(props, "enable_face_exclusion", obs_module_text("EnableFaceExclusion"));
+	obs_property_t *min_face_area_ratio = obs_properties_add_float_slider(props, "min_face_area_ratio", obs_module_text("MinFaceAreaRatio"), 0.0, 100.0, 0.1);
+
+	obs_property_set_modified_callback(enable_face_exclusion, [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
+		const bool enabled = obs_data_get_bool(settings, "enable_face_exclusion") && obs_data_get_bool(settings, "advanced");
+		obs_property_set_visible(obs_properties_get(props_, "face_category"), enabled);
+		obs_property_set_visible(obs_properties_get(props_, "person_category"), enabled);
+		obs_property_set_visible(obs_properties_get(props_, "min_face_area_ratio"), enabled);
+		return true;
+	});
+
 	obs_property_t *max_area_ratio = obs_properties_add_float_slider(props, "max_area_ratio",
 				      obs_module_text("MaxAreaRatio"), 0.0, 100.0, 0.1);
 	obs_property_t *exclude_seconds = obs_properties_add_float_slider(props, "exclude_seconds_threshold",
@@ -433,11 +466,23 @@ obs_properties_t *detect_filter_properties(void *data)
 					set_class_names_on_object_category(
 						obs_properties_get(props_, "object_category"),
 						yunet::FACE_CLASSES);
+					set_class_names_on_object_category(
+						obs_properties_get(props_, "face_category"),
+						yunet::FACE_CLASSES);
+					set_class_names_on_object_category(
+						obs_properties_get(props_, "person_category"),
+						yunet::FACE_CLASSES);
 					tf_->classNames = yunet::FACE_CLASSES;
 				} else {
 					// reset the class names to COCO classes for default models
 					set_class_names_on_object_category(
 						obs_properties_get(props_, "object_category"),
+						edgeyolo_cpp::COCO_CLASSES);
+					set_class_names_on_object_category(
+						obs_properties_get(props_, "face_category"),
+						edgeyolo_cpp::COCO_CLASSES);
+					set_class_names_on_object_category(
+						obs_properties_get(props_, "person_category"),
 						edgeyolo_cpp::COCO_CLASSES);
 					tf_->classNames = edgeyolo_cpp::COCO_CLASSES;
 				}
@@ -512,6 +557,10 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_double(settings, "threshold", 0.5);
 	obs_data_set_default_string(settings, "model_size", "small");
 	obs_data_set_default_int(settings, "object_category", -1);
+	obs_data_set_default_bool(settings, "enable_face_exclusion", false);
+	obs_data_set_default_int(settings, "face_category", -1);
+	obs_data_set_default_int(settings, "person_category", -1);
+	obs_data_set_default_double(settings, "min_face_area_ratio", 30.0);
 	obs_data_set_default_bool(settings, "masking_group", false);
 	obs_data_set_default_string(settings, "masking_type", "none");
 	obs_data_set_default_string(settings, "masking_color", "#000000");
@@ -543,6 +592,10 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	tf->debugMode = obs_data_get_bool(settings, "debug_mode");
 	tf->conf_threshold = (float)obs_data_get_double(settings, "threshold");
 	tf->objectCategory = (int)obs_data_get_int(settings, "object_category");
+	tf->enableFaceExclusion = obs_data_get_bool(settings, "enable_face_exclusion");
+	tf->faceCategory = (int)obs_data_get_int(settings, "face_category");
+	tf->personCategory = (int)obs_data_get_int(settings, "person_category");
+	tf->minFaceAreaRatio = (float)obs_data_get_double(settings, "min_face_area_ratio");
 	tf->maskingEnabled = obs_data_get_bool(settings, "masking_group");
 	tf->maskingType = obs_data_get_string(settings, "masking_type");
 	tf->maskingColor = (int)obs_data_get_int(settings, "masking_color");
@@ -888,6 +941,17 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 		objects = filtered_objects;
 	}
 
+	std::vector<cv::Rect_<float>> valid_faces;
+	if (tf->enableFaceExclusion && tf->faceCategory != -1 && tf->personCategory != -1) {
+		float screenArea = (float)(imageBGRA.cols * imageBGRA.rows);
+		float minFaceAreaPixels = screenArea * (tf->minFaceAreaRatio / 100.0f);
+		for (const Object &obj : objects) {
+			if (obj.label == tf->faceCategory && obj.rect.area() >= minFaceAreaPixels) {
+				valid_faces.push_back(obj.rect);
+			}
+		}
+	}
+
 	if (tf->objectCategory != -1) {
 		std::vector<Object> filtered_objects;
 		for (const Object &obj : objects) {
@@ -906,7 +970,33 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 
 	std::vector<Object> all_objects; // for preview
 
-	if (tf->enableExclude) {
+	if (tf->enableFaceExclusion && tf->sortTracking && tf->faceCategory != -1 && tf->personCategory != -1) {
+		std::unordered_set<uint64_t> current_ids;
+		for (Object &obj : objects) {
+			current_ids.insert(obj.id);
+			if (obj.label != tf->personCategory) continue;
+			
+			for (const auto &face_rect : valid_faces) {
+				cv::Point2f face_center(face_rect.x + face_rect.width / 2.0f, face_rect.y + face_rect.height / 2.0f);
+				cv::Rect_<float> upper_body_rect(obj.rect.x, obj.rect.y, obj.rect.width, obj.rect.height * 0.4f);
+				if (upper_body_rect.contains(face_center)) {
+					tf->faceExemptIds.insert(obj.id);
+					break;
+				}
+			}
+		}
+		
+		// Cleanup lost tracks from faceExemptIds
+		for (auto it = tf->faceExemptIds.begin(); it != tf->faceExemptIds.end();) {
+			if (!current_ids.count(*it)) {
+				it = tf->faceExemptIds.erase(it);
+			} else {
+				++it;
+			}
+		}
+	}
+
+	if (tf->enableExclude || tf->enableFaceExclusion) {
 		float maxAreaPixels = (float)(imageBGRA.cols * imageBGRA.rows) * (tf->maxAreaRatio / 100.0f);
 		std::vector<Object> filtered_objects;
 		
@@ -923,29 +1013,35 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 			for (Object &obj : objects) {
 				current_ids.insert(obj.id);
 				
-				// Handle Safety Drop-off
-				if (tf->keepExemptUntilLost && tf->exemptIds.count(obj.id)) {
-					if (obj.rect.area() < maxAreaPixels * tf->exemptDropoffRatio) {
-						tf->exemptIds.erase(obj.id);
+				if (tf->enableExclude) {
+					// Handle Safety Drop-off
+					if (tf->keepExemptUntilLost && tf->exemptIds.count(obj.id)) {
+						if (obj.rect.area() < maxAreaPixels * tf->exemptDropoffRatio) {
+							tf->exemptIds.erase(obj.id);
+							tf->largeFramesCount[obj.id] = 0;
+						}
+					}
+
+					// Area checks
+					if (obj.rect.area() > maxAreaPixels) {
+						tf->largeFramesCount[obj.id]++;
+					} else if (!tf->keepExemptUntilLost || !tf->exemptIds.count(obj.id)) {
 						tf->largeFramesCount[obj.id] = 0;
+					}
+
+					// Threshold checks
+					if (tf->largeFramesCount[obj.id] >= excludeFramesThreshold) {
+						tf->exemptIds.insert(obj.id);
+					}
+
+					obj.isExempt = tf->exemptIds.count(obj.id);
+					if (!tf->keepExemptUntilLost) {
+						obj.isExempt = (tf->largeFramesCount[obj.id] >= excludeFramesThreshold);
 					}
 				}
 
-				// Area checks
-				if (obj.rect.area() > maxAreaPixels) {
-					tf->largeFramesCount[obj.id]++;
-				} else if (!tf->keepExemptUntilLost || !tf->exemptIds.count(obj.id)) {
-					tf->largeFramesCount[obj.id] = 0;
-				}
-
-				// Threshold checks
-				if (tf->largeFramesCount[obj.id] >= excludeFramesThreshold) {
-					tf->exemptIds.insert(obj.id);
-				}
-
-				obj.isExempt = tf->exemptIds.count(obj.id);
-				if (!tf->keepExemptUntilLost) {
-					obj.isExempt = (tf->largeFramesCount[obj.id] >= excludeFramesThreshold);
+				if (tf->enableFaceExclusion && tf->faceExemptIds.count(obj.id)) {
+					obj.isExempt = true;
 				}
 
 				if (obj.isExempt) {
@@ -953,7 +1049,7 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 				}
 			}
 
-			if (tf->excludeSingleOnly && exempt_candidates.size() > 1) {
+			if (tf->enableExclude && tf->excludeSingleOnly && exempt_candidates.size() > 1) {
 				Object* oldest = exempt_candidates[0];
 				uint64_t min_id = oldest->id;
 				for (size_t i = 1; i < exempt_candidates.size(); ++i) {
@@ -963,7 +1059,7 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 					}
 				}
 				for (Object* cand : exempt_candidates) {
-					if (cand != oldest) {
+					if (cand != oldest && !(tf->enableFaceExclusion && tf->faceExemptIds.count(cand->id))) {
 						cand->isExempt = false;
 					}
 				}
@@ -998,13 +1094,29 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 			// fallback for when sortTracking is disabled
 			std::vector<Object*> exempt_candidates;
 			for (Object &obj : objects) {
-				if (obj.rect.area() > maxAreaPixels) {
-					obj.isExempt = true;
+				if (tf->enableExclude) {
+					if (obj.rect.area() > maxAreaPixels) {
+						obj.isExempt = true;
+					}
+				}
+				if (tf->enableFaceExclusion && tf->faceCategory != -1 && tf->personCategory != -1) {
+					if (obj.label == tf->personCategory) {
+						for (const auto &face_rect : valid_faces) {
+							cv::Point2f face_center(face_rect.x + face_rect.width / 2.0f, face_rect.y + face_rect.height / 2.0f);
+							cv::Rect_<float> upper_body_rect(obj.rect.x, obj.rect.y, obj.rect.width, obj.rect.height * 0.4f);
+							if (upper_body_rect.contains(face_center)) {
+								obj.isExempt = true;
+								break;
+							}
+						}
+					}
+				}
+				if (obj.isExempt) {
 					exempt_candidates.push_back(&obj);
 				}
 			}
 
-			if (tf->excludeSingleOnly && exempt_candidates.size() > 1) {
+			if (tf->enableExclude && tf->excludeSingleOnly && exempt_candidates.size() > 1) {
 				Object* oldest = exempt_candidates[0];
 				uint64_t min_id = oldest->id;
 				for (size_t i = 1; i < exempt_candidates.size(); ++i) {
