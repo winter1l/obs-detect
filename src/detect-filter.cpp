@@ -85,7 +85,7 @@ static bool enable_advanced_settings(obs_properties_t *ppts, obs_property_t *p,
 	}
 
 	bool face_exclude_enabled = enabled && obs_data_get_bool(settings, "enable_face_exclusion");
-	for (const char *prop_name : {"face_category", "person_category", "min_face_area_ratio"}) {
+	for (const char *prop_name : {"face_category", "person_category", "min_face_area_ratio", "face_inference_interval"}) {
 		p = obs_properties_get(ppts, prop_name);
 		if (p) {
 			obs_property_set_visible(p, face_exclude_enabled);
@@ -369,6 +369,7 @@ obs_properties_t *detect_filter_properties(void *data)
 	
 	obs_property_t *enable_face_exclusion = obs_properties_add_bool(props, "enable_face_exclusion", obs_module_text("EnableFaceExclusion"));
 	obs_property_t *min_face_area_ratio = obs_properties_add_float_slider(props, "min_face_area_ratio", obs_module_text("MinFaceAreaRatio"), 0.0, 100.0, 0.1);
+	obs_property_t *face_inference_interval = obs_properties_add_int_slider(props, "face_inference_interval", obs_module_text("FaceInferenceInterval"), 1, 120, 1);
 
 	obs_property_set_modified_callback(enable_face_exclusion, [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
 		const bool enabled = obs_data_get_bool(settings, "enable_face_exclusion") && obs_data_get_bool(settings, "advanced");
@@ -376,6 +377,7 @@ obs_properties_t *detect_filter_properties(void *data)
 		obs_property_set_visible(obs_properties_get(props_, "face_match_threshold"), enabled);
 		obs_property_set_visible(obs_properties_get(props_, "person_category"), enabled);
 		obs_property_set_visible(obs_properties_get(props_, "min_face_area_ratio"), enabled);
+		obs_property_set_visible(obs_properties_get(props_, "face_inference_interval"), enabled);
 		return true;
 	});
 
@@ -574,6 +576,7 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_double(settings, "face_match_threshold", 0.36);
 	obs_data_set_default_int(settings, "person_category", -1);
 	obs_data_set_default_double(settings, "min_face_area_ratio", 30.0);
+	obs_data_set_default_int(settings, "face_inference_interval", 30);
 	obs_data_set_default_bool(settings, "masking_group", false);
 	obs_data_set_default_string(settings, "masking_type", "none");
 	obs_data_set_default_string(settings, "masking_color", "#000000");
@@ -615,6 +618,7 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	tf->faceMatchThreshold = (float)obs_data_get_double(settings, "face_match_threshold");
 	tf->personCategory = (int)obs_data_get_int(settings, "person_category");
 	tf->minFaceAreaRatio = (float)obs_data_get_double(settings, "min_face_area_ratio");
+	tf->faceInferenceInterval = (int)obs_data_get_int(settings, "face_inference_interval");
 	tf->maskingEnabled = obs_data_get_bool(settings, "masking_group");
 	tf->maskingType = obs_data_get_string(settings, "masking_type");
 	tf->maskingColor = (int)obs_data_get_int(settings, "masking_color");
@@ -1090,6 +1094,8 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 		float screenArea = (float)(imageBGRA.cols * imageBGRA.rows);
 		float minPersonAreaPixels = screenArea * (tf->minFaceAreaRatio / 100.0f); // use as min person size to save perf
 
+		std::vector<Object> to_check;
+
 		for (Object &obj : objects) {
 			current_ids.insert(obj.id);
 			if (tf->personCategory != -1 && obj.label != tf->personCategory) continue;
@@ -1103,51 +1109,24 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 				continue;
 			}
 
-			// Throttle and Size Check (Re-evaluate NOT_ME every 30 frames, UNKNOWN every 10 frames)
-			int throttleFrames = (tf->faceStatusCache.count(obj.id) && tf->faceStatusCache[obj.id] == filter_data::FaceStatus::NOT_ME) ? 30 : 10;
-			
-			if (tf->frameCount % throttleFrames == 0) {
+			// Throttle Check
+			if (tf->frameCount % tf->faceInferenceInterval == 0) {
 				if (obj.rect.area() < minPersonAreaPixels) {
 					obs_log(LOG_INFO, "Face check skipped for obj %llu: area %.0f < min %.0f", (unsigned long long)obj.id, obj.rect.area(), minPersonAreaPixels);
 				} else {
-					// Crop Upper Body (approx 40% of height)
-					cv::Rect_<float> upper_body_rect(obj.rect.x, obj.rect.y, obj.rect.width, obj.rect.height * 0.4f);
-					
-					// Ensure within image bounds
-					cv::Rect crop_rect = upper_body_rect & cv::Rect_<float>(0, 0, (float)imageBGRA.cols, (float)imageBGRA.rows);
-					if (crop_rect.width > 0 && crop_rect.height > 0) {
-						cv::Mat cropped = imageBGRA(crop_rect);
-						cv::Mat croppedBGR;
-						cv::cvtColor(cropped, croppedBGR, cv::COLOR_BGRA2BGR);
-						
-						std::vector<Object> faces = tf->yunetModel->inference(croppedBGR);
-						bool is_me = false;
-						if (!faces.empty()) {
-							std::vector<float> feat = tf->sfaceModel->inference(croppedBGR, faces[0].landmarks);
-							float max_sim = -1.0f;
-							for (const auto& refFeat : tf->referenceFaceFeatures) {
-								float sim = sface::SFaceONNX::match(feat, refFeat);
-								if (sim > max_sim) max_sim = sim;
-							}
-							obs_log(LOG_INFO, "Face matched for obj %llu: similarity %.3f (threshold %.3f)", (unsigned long long)obj.id, max_sim, tf->faceMatchThreshold);
-							if (max_sim >= tf->faceMatchThreshold) {
-								is_me = true;
-							}
-						} else {
-							obs_log(LOG_INFO, "No face detected in cropped region for obj %llu", (unsigned long long)obj.id);
-						}
-						
-						if (is_me) {
-							tf->faceStatusCache[obj.id] = filter_data::FaceStatus::IS_ME;
-							tf->faceExemptIds.insert(obj.id);
-						} else {
-							tf->faceStatusCache[obj.id] = filter_data::FaceStatus::NOT_ME;
-						}
-					}
+					tf->faceStatusCache[obj.id] = filter_data::FaceStatus::CHECKING;
+					to_check.push_back(obj);
 				}
 			} else if (!tf->faceStatusCache.count(obj.id)) {
 				tf->faceStatusCache[obj.id] = filter_data::FaceStatus::UNKNOWN;
 			}
+		}
+
+		if (!to_check.empty()) {
+			std::unique_lock<std::mutex> lock(tf->faceInferenceMutex);
+			tf->faceInferenceFrame = imageBGRA.clone();
+			tf->faceInferenceQueue = to_check;
+			tf->faceInferenceCV.notify_one();
 		}
 		
 		// Cleanup lost tracks from cache and faceExemptIds
@@ -1416,6 +1395,7 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 	tf->isInferencing = false;
 }
 static void inference_thread_loop(struct detect_filter *tf);
+static void face_inference_thread_loop(struct detect_filter *tf);
 
 void *detect_filter_create(obs_data_t *settings, obs_source_t *source)
 {
@@ -1457,7 +1437,10 @@ void *detect_filter_create(obs_data_t *settings, obs_source_t *source)
 	tf->stopInferenceThread = false;
 	tf->isInferencing = false;
 	tf->inferenceFrameReady = false;
+	tf->stopFaceInferenceThread = false;
+
 	tf->inferenceThread = std::thread(inference_thread_loop, tf);
+	tf->faceInferenceThread = std::thread(face_inference_thread_loop, tf);
 
 	return tf;
 }
@@ -1475,6 +1458,12 @@ void detect_filter_destroy(void *data)
 		tf->inferenceCV.notify_all();
 		if (tf->inferenceThread.joinable()) {
 			tf->inferenceThread.join();
+		}
+		
+		tf->stopFaceInferenceThread = true;
+		tf->faceInferenceCV.notify_all();
+		if (tf->faceInferenceThread.joinable()) {
+			tf->faceInferenceThread.join();
 		}
 
 		obs_enter_graphics();
@@ -1519,6 +1508,74 @@ static void inference_thread_loop(struct detect_filter *tf)
 		run_model_inference(tf, imageBGRA);
 	}
 	obs_log(LOG_INFO, "Inference thread stopped");
+}
+
+static void face_inference_thread_loop(struct detect_filter *tf)
+{
+	obs_log(LOG_INFO, "Face Inference thread started");
+	while (!tf->stopFaceInferenceThread) {
+		std::vector<Object> to_check;
+		cv::Mat imageBGRA;
+		
+		{
+			std::unique_lock<std::mutex> lock(tf->faceInferenceMutex);
+			tf->faceInferenceCV.wait(lock, [tf] {
+				return !tf->faceInferenceQueue.empty() || tf->stopFaceInferenceThread;
+			});
+
+			if (tf->stopFaceInferenceThread) {
+				break;
+			}
+			
+			to_check = std::move(tf->faceInferenceQueue);
+			tf->faceInferenceQueue.clear();
+			imageBGRA = tf->faceInferenceFrame.clone();
+		}
+
+		if (imageBGRA.empty() || !tf->yunetModel || !tf->sfaceModel) {
+			continue;
+		}
+
+		for (const Object& obj : to_check) {
+			if (tf->stopFaceInferenceThread) break;
+
+			cv::Rect_<float> upper_body_rect(obj.rect.x, obj.rect.y, obj.rect.width, obj.rect.height * 0.4f);
+			cv::Rect crop_rect = upper_body_rect & cv::Rect_<float>(0, 0, (float)imageBGRA.cols, (float)imageBGRA.rows);
+			
+			if (crop_rect.width > 0 && crop_rect.height > 0) {
+				cv::Mat cropped = imageBGRA(crop_rect);
+				cv::Mat croppedBGR;
+				cv::cvtColor(cropped, croppedBGR, cv::COLOR_BGRA2BGR);
+				
+				std::vector<Object> faces = tf->yunetModel->inference(croppedBGR);
+				bool is_me = false;
+				if (!faces.empty()) {
+					std::vector<float> feat = tf->sfaceModel->inference(croppedBGR, faces[0].landmarks);
+					float max_sim = -1.0f;
+					for (const auto& refFeat : tf->referenceFaceFeatures) {
+						float sim = sface::SFaceONNX::match(feat, refFeat);
+						if (sim > max_sim) max_sim = sim;
+					}
+					obs_log(LOG_INFO, "Face matched for obj %llu: similarity %.3f (threshold %.3f)", (unsigned long long)obj.id, max_sim, tf->faceMatchThreshold);
+					if (max_sim >= tf->faceMatchThreshold) {
+						is_me = true;
+					}
+				} else {
+					obs_log(LOG_INFO, "No face detected in cropped region for obj %llu", (unsigned long long)obj.id);
+				}
+				
+				if (is_me) {
+					tf->faceStatusCache[obj.id] = filter_data::FaceStatus::IS_ME;
+					tf->faceExemptIds.insert(obj.id);
+				} else {
+					tf->faceStatusCache[obj.id] = filter_data::FaceStatus::NOT_ME;
+				}
+			} else {
+				tf->faceStatusCache[obj.id] = filter_data::FaceStatus::UNKNOWN;
+			}
+		}
+	}
+	obs_log(LOG_INFO, "Face Inference thread stopped");
 }
 
 void detect_filter_video_tick(void *data, float seconds)

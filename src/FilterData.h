@@ -35,6 +35,7 @@ struct filter_data {
 	float faceMatchThreshold;
 	int personCategory;
 	float minFaceAreaRatio;
+	int faceInferenceInterval;
 
 	enum FaceStatus { UNKNOWN, CHECKING, IS_ME, NOT_ME };
 	std::unordered_map<uint64_t, FaceStatus> faceStatusCache;
@@ -111,6 +112,14 @@ struct filter_data {
 	cv::Rect inferenceCropRect;
 	bool inferenceFrameReady;
 	uint64_t frameCount;
+
+	// Face Inference background thread
+	std::thread faceInferenceThread;
+	std::atomic<bool> stopFaceInferenceThread;
+	std::mutex faceInferenceMutex;
+	std::condition_variable faceInferenceCV;
+	std::vector<Object> faceInferenceQueue;
+	cv::Mat faceInferenceFrame;
 
 	std::unique_ptr<ONNXRuntimeModel> onnxruntimemodel;
 	std::vector<std::string> classNames;
