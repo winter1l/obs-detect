@@ -1049,15 +1049,15 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 			if (obj.label != tf->personCategory) continue;
 
 			// Check Cache
-			if (tf->faceStatusCache.count(obj.id) && tf->faceStatusCache[obj.id] != filter_data::FaceStatus::UNKNOWN) {
-				if (tf->faceStatusCache[obj.id] == filter_data::FaceStatus::IS_ME) {
-					tf->faceExemptIds.insert(obj.id);
-				}
-				continue; // Skip YuNet if already resolved (IS_ME or NOT_ME)
+			if (tf->faceStatusCache.count(obj.id) && tf->faceStatusCache[obj.id] == filter_data::FaceStatus::IS_ME) {
+				tf->faceExemptIds.insert(obj.id);
+				continue; // Skip YuNet if already resolved as IS_ME
 			}
 
-			// Throttle and Size Check
-			if (tf->frameCount % 10 == 0 && obj.rect.area() >= minPersonAreaPixels) {
+			// Throttle and Size Check (Re-evaluate NOT_ME every 30 frames, UNKNOWN every 10 frames)
+			int throttleFrames = (tf->faceStatusCache.count(obj.id) && tf->faceStatusCache[obj.id] == filter_data::FaceStatus::NOT_ME) ? 30 : 10;
+			
+			if (tf->frameCount % throttleFrames == 0 && obj.rect.area() >= minPersonAreaPixels) {
 				// Crop Upper Body (approx 40% of height)
 				cv::Rect_<float> upper_body_rect(obj.rect.x, obj.rect.y, obj.rect.width, obj.rect.height * 0.4f);
 				
