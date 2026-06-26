@@ -1061,14 +1061,14 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 
 	std::vector<Object> all_objects; // for preview
 
-	if (tf->enableFaceExclusion && tf->sortTracking && tf->personCategory != -1 && tf->yunetModel && tf->sfaceModel && !tf->referenceFaceFeature.empty()) {
+	if (tf->enableFaceExclusion && tf->sortTracking && tf->yunetModel && tf->sfaceModel && !tf->referenceFaceFeature.empty()) {
 		std::unordered_set<uint64_t> current_ids;
 		float screenArea = (float)(imageBGRA.cols * imageBGRA.rows);
 		float minPersonAreaPixels = screenArea * (tf->minFaceAreaRatio / 100.0f); // use as min person size to save perf
 
 		for (Object &obj : objects) {
 			current_ids.insert(obj.id);
-			if (obj.label != tf->personCategory) continue;
+			if (tf->personCategory != -1 && obj.label != tf->personCategory) continue;
 
 			// Check Cache
 			if (tf->faceStatusCache.count(obj.id) && tf->faceStatusCache[obj.id] == filter_data::FaceStatus::IS_ME) {
@@ -1079,32 +1079,39 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 			// Throttle and Size Check (Re-evaluate NOT_ME every 30 frames, UNKNOWN every 10 frames)
 			int throttleFrames = (tf->faceStatusCache.count(obj.id) && tf->faceStatusCache[obj.id] == filter_data::FaceStatus::NOT_ME) ? 30 : 10;
 			
-			if (tf->frameCount % throttleFrames == 0 && obj.rect.area() >= minPersonAreaPixels) {
-				// Crop Upper Body (approx 40% of height)
-				cv::Rect_<float> upper_body_rect(obj.rect.x, obj.rect.y, obj.rect.width, obj.rect.height * 0.4f);
-				
-				// Ensure within image bounds
-				cv::Rect crop_rect = upper_body_rect & cv::Rect_<float>(0, 0, (float)imageBGRA.cols, (float)imageBGRA.rows);
-				if (crop_rect.width > 0 && crop_rect.height > 0) {
-					cv::Mat cropped = imageBGRA(crop_rect);
-					cv::Mat croppedBGR;
-					cv::cvtColor(cropped, croppedBGR, cv::COLOR_BGRA2BGR);
+			if (tf->frameCount % throttleFrames == 0) {
+				if (obj.rect.area() < minPersonAreaPixels) {
+					obs_log(LOG_INFO, "Face check skipped for obj %llu: area %.0f < min %.0f", (unsigned long long)obj.id, obj.rect.area(), minPersonAreaPixels);
+				} else {
+					// Crop Upper Body (approx 40% of height)
+					cv::Rect_<float> upper_body_rect(obj.rect.x, obj.rect.y, obj.rect.width, obj.rect.height * 0.4f);
 					
-					std::vector<Object> faces = tf->yunetModel->inference(croppedBGR);
-					bool is_me = false;
-					if (!faces.empty()) {
-						std::vector<float> feat = tf->sfaceModel->inference(croppedBGR, faces[0].landmarks);
-						float sim = sface::SFaceONNX::match(feat, tf->referenceFaceFeature);
-						if (sim >= tf->faceMatchThreshold) {
-							is_me = true;
+					// Ensure within image bounds
+					cv::Rect crop_rect = upper_body_rect & cv::Rect_<float>(0, 0, (float)imageBGRA.cols, (float)imageBGRA.rows);
+					if (crop_rect.width > 0 && crop_rect.height > 0) {
+						cv::Mat cropped = imageBGRA(crop_rect);
+						cv::Mat croppedBGR;
+						cv::cvtColor(cropped, croppedBGR, cv::COLOR_BGRA2BGR);
+						
+						std::vector<Object> faces = tf->yunetModel->inference(croppedBGR);
+						bool is_me = false;
+						if (!faces.empty()) {
+							std::vector<float> feat = tf->sfaceModel->inference(croppedBGR, faces[0].landmarks);
+							float sim = sface::SFaceONNX::match(feat, tf->referenceFaceFeature);
+							obs_log(LOG_INFO, "Face matched for obj %llu: similarity %.3f (threshold %.3f)", (unsigned long long)obj.id, sim, tf->faceMatchThreshold);
+							if (sim >= tf->faceMatchThreshold) {
+								is_me = true;
+							}
+						} else {
+							obs_log(LOG_INFO, "No face detected in cropped region for obj %llu", (unsigned long long)obj.id);
 						}
-					}
-					
-					if (is_me) {
-						tf->faceStatusCache[obj.id] = filter_data::FaceStatus::IS_ME;
-						tf->faceExemptIds.insert(obj.id);
-					} else {
-						tf->faceStatusCache[obj.id] = filter_data::FaceStatus::NOT_ME;
+						
+						if (is_me) {
+							tf->faceStatusCache[obj.id] = filter_data::FaceStatus::IS_ME;
+							tf->faceExemptIds.insert(obj.id);
+						} else {
+							tf->faceStatusCache[obj.id] = filter_data::FaceStatus::NOT_ME;
+						}
 					}
 				}
 			} else if (!tf->faceStatusCache.count(obj.id)) {
