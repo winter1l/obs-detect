@@ -30,6 +30,42 @@ public:
 	// Get Max Unseen Frames
 	size_t getMaxUnseenFrames() const { return this->maxUnseenFrames; }
 
+	// Set Min Hit Frames
+	void setMinHitFrames(int minHitFrames_)
+	{
+		this->minHitFrames = minHitFrames_;
+	}
+
+	// Get Min Hit Frames
+	int getMinHitFrames() const { return this->minHitFrames; }
+
+	// Set IoU Threshold
+	void setIouThreshold(float iouThreshold_)
+	{
+		this->iouThreshold = iouThreshold_;
+	}
+
+	// Get IoU Threshold
+	float getIouThreshold() const { return this->iouThreshold; }
+
+	// Set Instant Track Area Ratio
+	void setInstantTrackAreaRatio(float ratio)
+	{
+		this->instantTrackAreaRatio = ratio;
+	}
+
+	// Get Instant Track Area Ratio
+	float getInstantTrackAreaRatio() const { return this->instantTrackAreaRatio; }
+
+	// Set Screen Area
+	void setScreenArea(float area)
+	{
+		this->screenArea = area;
+	}
+
+	// Get Screen Area
+	float getScreenArea() const { return this->screenArea; }
+
 private:
 	// Private methods for the Kalman filter and other internal workings
 	void initializeKalmanFilter(cv::KalmanFilter &kf, const cv::Rect_<float> &bbox);
@@ -40,6 +76,10 @@ private:
 	std::vector<Object> trackedObjects;
 	uint64_t nextTrackID;
 	size_t maxUnseenFrames;
+	int minHitFrames;
+	float iouThreshold = 0.3f;
+	float instantTrackAreaRatio = 0.0f;
+	float screenArea = 0.0f;
 };
 
 #endif

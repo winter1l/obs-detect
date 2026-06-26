@@ -11,8 +11,11 @@
 
 #include <numeric>
 #include <memory>
+#include <algorithm>
 #include <exception>
 #include <fstream>
+#include <string>
+#include <chrono>
 #include <new>
 #include <mutex>
 #include <regex>
@@ -59,9 +62,27 @@ static bool enable_advanced_settings(obs_properties_t *ppts, obs_property_t *p,
 	for (const char *prop_name :
 	     {"threshold", "useGPU", "numThreads", "model_size", "detected_object", "sort_tracking",
 	      "max_unseen_frames", "show_unseen_objects", "save_detections_path", "crop_group",
-	      "min_size_threshold"}) {
+	      "min_size_threshold", "min_hit_frames", "enable_exclude"}) {
 		p = obs_properties_get(ppts, prop_name);
 		obs_property_set_visible(p, enabled);
+	}
+
+	bool exclude_enabled = enabled && obs_data_get_bool(settings, "enable_exclude");
+	for (const char *prop_name :
+	     {"max_area_ratio", "exclude_seconds_threshold", "keep_exempt_until_lost", "exempt_dropoff_ratio", "exclude_single_only"}) {
+		p = obs_properties_get(ppts, prop_name);
+		if (p) {
+			obs_property_set_visible(p, exclude_enabled);
+		}
+	}
+
+	bool sort_enabled = enabled && obs_data_get_bool(settings, "sort_tracking");
+	for (const char *prop_name :
+	     {"iou_threshold", "instant_track_area_ratio"}) {
+		p = obs_properties_get(ppts, prop_name);
+		if (p) {
+			obs_property_set_visible(p, sort_enabled);
+		}
 	}
 
 	return true;
@@ -137,6 +158,8 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_t *props = obs_properties_create();
 
 	obs_properties_add_bool(props, "preview", obs_module_text("Preview"));
+	obs_properties_add_bool(props, "sync_mode", obs_module_text("SynchronousMode"));
+	obs_properties_add_bool(props, "debug_mode", obs_module_text("DebugMode"));
 
 	// add dropdown selection for object category selection: "All", or COCO classes
 	obs_property_t *object_category =
@@ -204,11 +227,14 @@ obs_properties_t *detect_filter_properties(void *data)
 		obs_property_t *masking_blur_radius =
 			obs_properties_get(props_, "masking_blur_radius");
 		obs_property_t *masking_dilation =
-			obs_properties_get(props_, "dilation_iterations");
+			obs_properties_get(props_, "masking_dilate_iterations");
+		obs_property_t *masking_dynamic_expansion =
+			obs_properties_get(props_, "masking_dynamic_expansion");
 		obs_property_set_visible(masking_color, false);
 		obs_property_set_visible(masking_blur_radius, false);
 		const bool masking_enabled = obs_data_get_bool(settings, "masking_group");
 		obs_property_set_visible(masking_dilation, masking_enabled);
+		obs_property_set_visible(masking_dynamic_expansion, masking_enabled);
 
 		if (masking_type_value == "solid_color") {
 			obs_property_set_visible(masking_color, masking_enabled);
@@ -219,8 +245,10 @@ obs_properties_t *detect_filter_properties(void *data)
 	});
 
 	// add slider for dilation iterations
-	obs_properties_add_int_slider(masking_group, "dilation_iterations",
-				      obs_module_text("DilationIterations"), 0, 20, 1);
+	obs_properties_add_int_slider(masking_group, "masking_dilate_iterations",
+				      obs_module_text("DilationIterations"), 0, 100, 1);
+	obs_properties_add_bool(masking_group, "masking_dynamic_expansion",
+				obs_module_text("MaskingDynamicExpansion"));
 
 	// add options group for tracking and zoom-follow options
 	obs_properties_t *tracking_group_props = obs_properties_create();
@@ -297,15 +325,50 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_property_set_enabled(detected_obj_prop, false);
 
 	// add threshold slider
-	obs_properties_add_float_slider(props, "threshold", obs_module_text("ConfThreshold"), 0.0,
+	obs_properties_add_float_slider(props, "threshold", obs_module_text("ConfThreshold"), 0.10,
 					1.0, 0.025);
 
 	// add minimal size threshold slider
 	obs_properties_add_int_slider(props, "min_size_threshold",
 				      obs_module_text("MinSizeThreshold"), 0, 10000, 1);
 
+	obs_property_t *enable_exclude = obs_properties_add_bool(props, "enable_exclude", obs_module_text("EnableExclude"));
+	
+	obs_property_t *max_area_ratio = obs_properties_add_float_slider(props, "max_area_ratio",
+				      obs_module_text("MaxAreaRatio"), 0.0, 100.0, 0.1);
+	obs_property_t *exclude_seconds = obs_properties_add_float_slider(props, "exclude_seconds_threshold",
+				      obs_module_text("ExcludeDelay"), 0.0, 10.0, 0.1);
+	obs_property_t *keep_exempt = obs_properties_add_bool(props, "keep_exempt_until_lost",
+				      obs_module_text("KeepExempt"));
+	obs_property_t *exempt_dropoff = obs_properties_add_float_slider(props, "exempt_dropoff_ratio",
+				      obs_module_text("SafetyDropoff"), 0.0, 1.0, 0.01);
+
+	obs_property_t *exclude_single = obs_properties_add_bool(props, "exclude_single_only",
+				      obs_module_text("ExcludeSingleOnly"));
+
+	obs_property_set_modified_callback(enable_exclude, [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
+		const bool enabled = obs_data_get_bool(settings, "enable_exclude") && obs_data_get_bool(settings, "advanced");
+		obs_property_set_visible(obs_properties_get(props_, "max_area_ratio"), enabled);
+		obs_property_set_visible(obs_properties_get(props_, "exclude_seconds_threshold"), enabled);
+		obs_property_set_visible(obs_properties_get(props_, "keep_exempt_until_lost"), enabled);
+		obs_property_set_visible(obs_properties_get(props_, "exempt_dropoff_ratio"), enabled);
+		obs_property_set_visible(obs_properties_get(props_, "exclude_single_only"), enabled);
+		return true;
+	});
+
 	// add SORT tracking enabled checkbox
-	obs_properties_add_bool(props, "sort_tracking", obs_module_text("SORTTracking"));
+	obs_property_t *sort_tracking = obs_properties_add_bool(props, "sort_tracking", obs_module_text("SORTTracking"));
+
+	obs_properties_add_int(props, "min_hit_frames", obs_module_text("MinHitFrames"), 1, 30, 1);
+	obs_property_t *iou_threshold = obs_properties_add_float_slider(props, "iou_threshold", obs_module_text("IouThreshold"), 0.0, 1.0, 0.01);
+	obs_property_t *instant_track_ratio = obs_properties_add_float_slider(props, "instant_track_area_ratio", obs_module_text("InstantTrackAreaRatio"), 0.0, 100.0, 0.1);
+
+	obs_property_set_modified_callback(sort_tracking, [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
+		const bool enabled = obs_data_get_bool(settings, "sort_tracking") && obs_data_get_bool(settings, "advanced");
+		obs_property_set_visible(obs_properties_get(props_, "iou_threshold"), enabled);
+		obs_property_set_visible(obs_properties_get(props_, "instant_track_area_ratio"), enabled);
+		return true;
+	});
 
 	// add parameter for number of missing frames before a track is considered lost
 	obs_properties_add_int(props, "max_unseen_frames", obs_module_text("MaxUnseenFrames"), 1,
@@ -335,7 +398,7 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_property_list_add_string(p_use_gpu, obs_module_text("CoreML"), USEGPU_COREML);
 #endif
 
-	obs_properties_add_int_slider(props, "numThreads", obs_module_text("NumThreads"), 0, 8, 1);
+	obs_properties_add_int_slider(props, "numThreads", obs_module_text("NumThreads"), 0, 32, 1);
 
 	// add drop down option for model size: Small, Medium, Large
 	obs_property_t *model_size =
@@ -428,7 +491,20 @@ void detect_filter_defaults(obs_data_t *settings)
 	// Linux
 	obs_data_set_default_string(settings, "useGPU", USEGPU_CPU);
 #endif
-	obs_data_set_default_bool(settings, "sort_tracking", false);
+	obs_data_set_default_bool(settings, "sort_tracking", true);
+	obs_data_set_default_bool(settings, "enable_exclude", false);
+	obs_data_set_default_bool(settings, "show_unseen_objects", false);
+	obs_data_set_default_bool(settings, "preview", false);
+	obs_data_set_default_bool(settings, "sync_mode", false);
+	obs_data_set_default_bool(settings, "debug_mode", false);
+	obs_data_set_default_double(settings, "max_area_ratio", 50.0);
+	obs_data_set_default_double(settings, "exclude_seconds_threshold", 1.0);
+	obs_data_set_default_bool(settings, "keep_exempt_until_lost", true);
+	obs_data_set_default_double(settings, "exempt_dropoff_ratio", 0.20);
+	obs_data_set_default_bool(settings, "exclude_single_only", true);
+	obs_data_set_default_int(settings, "min_hit_frames", 1);
+	obs_data_set_default_double(settings, "iou_threshold", 0.3);
+	obs_data_set_default_double(settings, "instant_track_area_ratio", 0.0);
 	obs_data_set_default_int(settings, "max_unseen_frames", 10);
 	obs_data_set_default_bool(settings, "show_unseen_objects", true);
 	obs_data_set_default_int(settings, "numThreads", 1);
@@ -439,7 +515,8 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "masking_group", false);
 	obs_data_set_default_string(settings, "masking_type", "none");
 	obs_data_set_default_string(settings, "masking_color", "#000000");
-	obs_data_set_default_int(settings, "masking_blur_radius", 0);
+	obs_data_set_default_int(settings, "masking_dilate_iterations", 0);
+	obs_data_set_default_bool(settings, "masking_dynamic_expansion", false);
 	obs_data_set_default_int(settings, "dilation_iterations", 0);
 	obs_data_set_default_bool(settings, "tracking_group", false);
 	obs_data_set_default_double(settings, "zoom_factor", 0.0);
@@ -462,13 +539,16 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	tf->isDisabled = true;
 
 	tf->preview = obs_data_get_bool(settings, "preview");
+	tf->syncMode = obs_data_get_bool(settings, "sync_mode");
+	tf->debugMode = obs_data_get_bool(settings, "debug_mode");
 	tf->conf_threshold = (float)obs_data_get_double(settings, "threshold");
 	tf->objectCategory = (int)obs_data_get_int(settings, "object_category");
 	tf->maskingEnabled = obs_data_get_bool(settings, "masking_group");
 	tf->maskingType = obs_data_get_string(settings, "masking_type");
 	tf->maskingColor = (int)obs_data_get_int(settings, "masking_color");
 	tf->maskingBlurRadius = (int)obs_data_get_int(settings, "masking_blur_radius");
-	tf->maskingDilateIterations = (int)obs_data_get_int(settings, "dilation_iterations");
+	tf->maskingDilateIterations = (int)obs_data_get_int(settings, "masking_dilate_iterations");
+	tf->maskingDynamicExpansion = obs_data_get_bool(settings, "masking_dynamic_expansion");
 	bool newTrackingEnabled = obs_data_get_bool(settings, "tracking_group");
 	tf->zoomFactor = (float)obs_data_get_double(settings, "zoom_factor");
 	tf->zoomSpeedFactor = (float)obs_data_get_double(settings, "zoom_speed_factor");
@@ -486,6 +566,24 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	tf->crop_top = (int)obs_data_get_int(settings, "crop_top");
 	tf->crop_bottom = (int)obs_data_get_int(settings, "crop_bottom");
 	tf->minAreaThreshold = (int)obs_data_get_int(settings, "min_size_threshold");
+	tf->enableExclude = obs_data_get_bool(settings, "enable_exclude");
+	tf->maxAreaRatio = (float)obs_data_get_double(settings, "max_area_ratio");
+	tf->excludeSecondsThreshold = (float)obs_data_get_double(settings, "exclude_seconds_threshold");
+	tf->keepExemptUntilLost = obs_data_get_bool(settings, "keep_exempt_until_lost");
+	tf->exemptDropoffRatio = (float)obs_data_get_double(settings, "exempt_dropoff_ratio");
+	tf->excludeSingleOnly = obs_data_get_bool(settings, "exclude_single_only");
+	tf->minHitFrames = (int)obs_data_get_int(settings, "min_hit_frames");
+	if (tf->tracker.getMinHitFrames() != tf->minHitFrames) {
+		tf->tracker.setMinHitFrames(tf->minHitFrames);
+	}
+	float iou_threshold = (float)obs_data_get_double(settings, "iou_threshold");
+	if (tf->tracker.getIouThreshold() != iou_threshold) {
+		tf->tracker.setIouThreshold(iou_threshold);
+	}
+	float instant_track_area_ratio = (float)obs_data_get_double(settings, "instant_track_area_ratio");
+	if (tf->tracker.getInstantTrackAreaRatio() != instant_track_area_ratio) {
+		tf->tracker.setInstantTrackAreaRatio(instant_track_area_ratio);
+	}
 
 	// check if tracking state has changed
 	if (tf->trackingEnabled != newTrackingEnabled) {
@@ -718,106 +816,26 @@ void detect_filter_deactivate(void *data)
 
 /**                   FILTER CORE                     */
 
-void *detect_filter_create(obs_data_t *settings, obs_source_t *source)
+static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 {
-	obs_log(LOG_INFO, "Detect filter created");
-	void *data = bmalloc(sizeof(struct detect_filter));
-	struct detect_filter *tf = new (data) detect_filter();
-
-	tf->source = source;
-	tf->texrender = gs_texrender_create(GS_BGRA, GS_ZS_NONE);
-	tf->lastDetectedObjectId = -1;
-
-	std::vector<std::tuple<const char *, gs_effect_t **>> effects = {
-		{KAWASE_BLUR_EFFECT_PATH, &tf->kawaseBlurEffect},
-		{MASKING_EFFECT_PATH, &tf->maskingEffect},
-		{PIXELATE_EFFECT_PATH, &tf->pixelateEffect},
-	};
-
-	for (auto [effectPath, effect] : effects) {
-		char *effectPathPtr = obs_module_file(effectPath);
-		if (!effectPathPtr) {
-			obs_log(LOG_ERROR, "Failed to get effect path: %s", effectPath);
-			tf->isDisabled = true;
-			return tf;
-		}
-		obs_enter_graphics();
-		*effect = gs_effect_create_from_file(effectPathPtr, nullptr);
-		bfree(effectPathPtr);
-		if (!*effect) {
-			obs_log(LOG_ERROR, "Failed to load effect: %s", effectPath);
-			tf->isDisabled = true;
-			return tf;
-		}
-		obs_leave_graphics();
-	}
-
-	detect_filter_update(tf, settings);
-
-	return tf;
-}
-
-void detect_filter_destroy(void *data)
-{
-	obs_log(LOG_INFO, "Detect filter destroyed");
-
-	struct detect_filter *tf = reinterpret_cast<detect_filter *>(data);
-
-	if (tf) {
-		tf->isDisabled = true;
-
-		obs_enter_graphics();
-		gs_texrender_destroy(tf->texrender);
-		if (tf->stagesurface) {
-			gs_stagesurface_destroy(tf->stagesurface);
-		}
-		gs_effect_destroy(tf->kawaseBlurEffect);
-		gs_effect_destroy(tf->maskingEffect);
-		obs_leave_graphics();
-		tf->~detect_filter();
-		bfree(tf);
-	}
-}
-
-void detect_filter_video_tick(void *data, float seconds)
-{
-	UNUSED_PARAMETER(seconds);
-
-	struct detect_filter *tf = reinterpret_cast<detect_filter *>(data);
-
-	if (tf->isDisabled || !tf->onnxruntimemodel) {
+	static auto last_loop_time = std::chrono::high_resolution_clock::now();
+	if (imageBGRA.empty() || !tf->onnxruntimemodel) {
+		tf->isInferencing = false;
 		return;
 	}
+		auto start_time = std::chrono::high_resolution_clock::now();
 
-	if (!obs_source_enabled(tf->source)) {
-		return;
-	}
+		cv::Mat inferenceFrame;
 
-	cv::Mat imageBGRA;
-	{
-		std::unique_lock<std::mutex> lock(tf->inputBGRALock, std::try_to_lock);
-		if (!lock.owns_lock()) {
-			// No data to process
-			return;
+		cv::Rect cropRect(0, 0, imageBGRA.cols, imageBGRA.rows);
+		if (tf->crop_enabled) {
+			cropRect = cv::Rect(tf->crop_left, tf->crop_top,
+					    imageBGRA.cols - tf->crop_left - tf->crop_right,
+					    imageBGRA.rows - tf->crop_top - tf->crop_bottom);
+			cv::cvtColor(imageBGRA(cropRect), inferenceFrame, cv::COLOR_BGRA2BGR);
+		} else {
+			cv::cvtColor(imageBGRA, inferenceFrame, cv::COLOR_BGRA2BGR);
 		}
-		if (tf->inputBGRA.empty()) {
-			// No data to process
-			return;
-		}
-		imageBGRA = tf->inputBGRA.clone();
-	}
-
-	cv::Mat inferenceFrame;
-
-	cv::Rect cropRect(0, 0, imageBGRA.cols, imageBGRA.rows);
-	if (tf->crop_enabled) {
-		cropRect = cv::Rect(tf->crop_left, tf->crop_top,
-				    imageBGRA.cols - tf->crop_left - tf->crop_right,
-				    imageBGRA.rows - tf->crop_top - tf->crop_bottom);
-		cv::cvtColor(imageBGRA(cropRect), inferenceFrame, cv::COLOR_BGRA2BGR);
-	} else {
-		cv::cvtColor(imageBGRA, inferenceFrame, cv::COLOR_BGRA2BGR);
-	}
 
 	std::vector<Object> objects;
 
@@ -881,7 +899,149 @@ void detect_filter_video_tick(void *data, float seconds)
 	}
 
 	if (tf->sortTracking) {
+		float screenArea = (float)(imageBGRA.cols * imageBGRA.rows);
+		tf->tracker.setScreenArea(screenArea);
 		objects = tf->tracker.update(objects);
+	}
+
+	std::vector<Object> all_objects; // for preview
+
+	if (tf->enableExclude) {
+		float maxAreaPixels = (float)(imageBGRA.cols * imageBGRA.rows) * (tf->maxAreaRatio / 100.0f);
+		std::vector<Object> filtered_objects;
+		
+		if (tf->sortTracking) {
+			obs_video_info ovi;
+			float fps = 30.0f;
+			if (obs_get_video_info(&ovi)) {
+				fps = (float)ovi.fps_num / ovi.fps_den;
+			}
+			uint64_t excludeFramesThreshold = (uint64_t)(tf->excludeSecondsThreshold * fps);
+			std::unordered_set<uint64_t> current_ids;
+
+			std::vector<Object*> exempt_candidates;
+			for (Object &obj : objects) {
+				current_ids.insert(obj.id);
+				
+				// Handle Safety Drop-off
+				if (tf->keepExemptUntilLost && tf->exemptIds.count(obj.id)) {
+					if (obj.rect.area() < maxAreaPixels * tf->exemptDropoffRatio) {
+						tf->exemptIds.erase(obj.id);
+						tf->largeFramesCount[obj.id] = 0;
+					}
+				}
+
+				// Area checks
+				if (obj.rect.area() > maxAreaPixels) {
+					tf->largeFramesCount[obj.id]++;
+				} else if (!tf->keepExemptUntilLost || !tf->exemptIds.count(obj.id)) {
+					tf->largeFramesCount[obj.id] = 0;
+				}
+
+				// Threshold checks
+				if (tf->largeFramesCount[obj.id] >= excludeFramesThreshold) {
+					tf->exemptIds.insert(obj.id);
+				}
+
+				obj.isExempt = tf->exemptIds.count(obj.id);
+				if (!tf->keepExemptUntilLost) {
+					obj.isExempt = (tf->largeFramesCount[obj.id] >= excludeFramesThreshold);
+				}
+
+				if (obj.isExempt) {
+					exempt_candidates.push_back(&obj);
+				}
+			}
+
+			if (tf->excludeSingleOnly && exempt_candidates.size() > 1) {
+				Object* oldest = exempt_candidates[0];
+				uint64_t min_id = oldest->id;
+				for (size_t i = 1; i < exempt_candidates.size(); ++i) {
+					if (exempt_candidates[i]->id < min_id) {
+						min_id = exempt_candidates[i]->id;
+						oldest = exempt_candidates[i];
+					}
+				}
+				for (Object* cand : exempt_candidates) {
+					if (cand != oldest) {
+						cand->isExempt = false;
+					}
+				}
+			}
+
+			for (Object &obj : objects) {
+				if (obj.hitFrames < tf->minHitFrames) {
+					obj.isUnconfirmed = true;
+				}
+				all_objects.push_back(obj);
+				if (!obj.isUnconfirmed && !obj.isExempt) {
+					filtered_objects.push_back(obj);
+				}
+			}
+			
+			// Cleanup
+			for (auto it = tf->largeFramesCount.begin(); it != tf->largeFramesCount.end();) {
+				if (!current_ids.count(it->first)) {
+					it = tf->largeFramesCount.erase(it);
+				} else {
+					++it;
+				}
+			}
+			for (auto it = tf->exemptIds.begin(); it != tf->exemptIds.end();) {
+				if (!current_ids.count(*it)) {
+					it = tf->exemptIds.erase(it);
+				} else {
+					++it;
+				}
+			}
+		} else {
+			// fallback for when sortTracking is disabled
+			std::vector<Object*> exempt_candidates;
+			for (Object &obj : objects) {
+				if (obj.rect.area() > maxAreaPixels) {
+					obj.isExempt = true;
+					exempt_candidates.push_back(&obj);
+				}
+			}
+
+			if (tf->excludeSingleOnly && exempt_candidates.size() > 1) {
+				Object* oldest = exempt_candidates[0];
+				uint64_t min_id = oldest->id;
+				for (size_t i = 1; i < exempt_candidates.size(); ++i) {
+					if (exempt_candidates[i]->id < min_id) {
+						min_id = exempt_candidates[i]->id;
+						oldest = exempt_candidates[i];
+					}
+				}
+				for (Object* cand : exempt_candidates) {
+					if (cand != oldest) {
+						cand->isExempt = false;
+					}
+				}
+			}
+
+			for (Object &obj : objects) {
+				// Fallback doesn't use hitFrames accurately, so everything is confirmed
+				obj.isUnconfirmed = false;
+				all_objects.push_back(obj);
+				if (!obj.isExempt) {
+					filtered_objects.push_back(obj);
+				}
+			}
+		}
+		objects = filtered_objects;
+	} else {
+		std::vector<Object> filtered_objects;
+		for (Object &obj : objects) {
+			if (tf->sortTracking && obj.hitFrames < tf->minHitFrames) {
+				obj.isUnconfirmed = true;
+			}
+			all_objects.push_back(obj);
+			if (!obj.isUnconfirmed) {
+				filtered_objects.push_back(obj);
+			}
+		}
+		objects = filtered_objects;
 	}
 
 	if (!tf->showUnseenObjects) {
@@ -889,6 +1049,10 @@ void detect_filter_video_tick(void *data, float seconds)
 			std::remove_if(objects.begin(), objects.end(),
 				       [](const Object &obj) { return obj.unseenFrames > 0; }),
 			objects.end());
+		all_objects.erase(
+			std::remove_if(all_objects.begin(), all_objects.end(),
+				       [](const Object &obj) { return obj.unseenFrames > 0; }),
+			all_objects.end());
 	}
 
 	if (!tf->saveDetectionsPath.empty()) {
@@ -914,7 +1078,7 @@ void detect_filter_video_tick(void *data, float seconds)
 		}
 	}
 
-	if (tf->preview || tf->maskingEnabled) {
+	if (tf->preview || tf->maskingEnabled || tf->debugMode) {
 		cv::Mat frame;
 		cv::cvtColor(imageBGRA, frame, cv::COLOR_BGRA2BGR);
 
@@ -922,32 +1086,196 @@ void detect_filter_video_tick(void *data, float seconds)
 			// draw the crop rectangle on the frame in a dashed line
 			drawDashedRectangle(frame, cropRect, cv::Scalar(0, 255, 0), 5, 8, 15);
 		}
-		if (tf->preview && objects.size() > 0) {
-			draw_objects(frame, objects, tf->classNames);
+		if (tf->preview && all_objects.size() > 0) {
+			draw_objects(frame, all_objects, tf->classNames);
 		}
 		if (tf->maskingEnabled) {
 			cv::Mat mask = cv::Mat::zeros(frame.size(), CV_8UC1);
 			for (const Object &obj : objects) {
-				cv::rectangle(mask, obj.rect, cv::Scalar(255), -1);
+				cv::Rect2f rect = obj.rect;
+				if (tf->maskingDilateIterations > 0) {
+					float expansion = (float)tf->maskingDilateIterations;
+					if (tf->maskingDynamicExpansion) {
+						float scale = rect.height / (float)frame.rows;
+						expansion *= scale;
+					}
+					rect.x -= expansion;
+					rect.y -= expansion;
+					rect.width += expansion * 2.0f;
+					rect.height += expansion * 2.0f;
+				}
+				cv::rectangle(mask, rect, cv::Scalar(255), -1);
 			}
 			std::lock_guard<std::mutex> lock(tf->outputLock);
 			mask.copyTo(tf->outputMask);
+		}
 
-			if (tf->maskingDilateIterations > 0) {
-				cv::Mat dilatedMask;
-				cv::dilate(tf->outputMask, dilatedMask, cv::Mat(),
-					   cv::Point(-1, -1), tf->maskingDilateIterations);
-				dilatedMask.copyTo(tf->outputMask);
-			}
+		if (tf->debugMode) {
+			char debugText[128];
+			snprintf(debugText, sizeof(debugText), "FPS: %.1f | Latency: %.1fms", tf->currentInferenceFPS, tf->currentInferenceTimeMs);
+			cv::putText(frame, debugText, cv::Point(20, 50), cv::FONT_HERSHEY_SIMPLEX, 1.5, cv::Scalar(0, 0, 255), 3, cv::LINE_AA);
 		}
 
 		std::lock_guard<std::mutex> lock(tf->outputLock);
 		cv::cvtColor(frame, tf->outputPreviewBGRA, cv::COLOR_BGR2BGRA);
 	}
 
+	auto end_time = std::chrono::high_resolution_clock::now();
+	tf->currentInferenceTimeMs = std::chrono::duration<float, std::milli>(end_time - start_time).count();
+	
+	float loopTimeMs = std::chrono::duration<float, std::milli>(end_time - last_loop_time).count();
+	last_loop_time = end_time;
+	
+	if (loopTimeMs > 0) {
+		tf->currentInferenceFPS = 1000.0f / loopTimeMs;
+	} else {
+		tf->currentInferenceFPS = 0.0f;
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(tf->outputLock);
+		tf->latestObjects = objects;
+	}
+	tf->isInferencing = false;
+}
+static void inference_thread_loop(struct detect_filter *tf);
+
+void *detect_filter_create(obs_data_t *settings, obs_source_t *source)
+{
+	obs_log(LOG_INFO, "Detect filter created");
+	void *data = bmalloc(sizeof(struct detect_filter));
+	struct detect_filter *tf = new (data) detect_filter();
+
+	tf->source = source;
+	tf->texrender = gs_texrender_create(GS_BGRA, GS_ZS_NONE);
+	tf->lastDetectedObjectId = -1;
+
+	std::vector<std::tuple<const char *, gs_effect_t **>> effects = {
+		{KAWASE_BLUR_EFFECT_PATH, &tf->kawaseBlurEffect},
+		{MASKING_EFFECT_PATH, &tf->maskingEffect},
+		{PIXELATE_EFFECT_PATH, &tf->pixelateEffect},
+	};
+
+	for (auto [effectPath, effect] : effects) {
+		char *effectPathPtr = obs_module_file(effectPath);
+		if (!effectPathPtr) {
+			obs_log(LOG_ERROR, "Failed to get effect path: %s", effectPath);
+			tf->isDisabled = true;
+			return tf;
+		}
+		obs_enter_graphics();
+		*effect = gs_effect_create_from_file(effectPathPtr, nullptr);
+		bfree(effectPathPtr);
+		if (!*effect) {
+			obs_log(LOG_ERROR, "Failed to load effect: %s", effectPath);
+			tf->isDisabled = true;
+			return tf;
+		}
+		obs_leave_graphics();
+	}
+
+	detect_filter_update(tf, settings);
+
+	tf->stopInferenceThread = false;
+	tf->isInferencing = false;
+	tf->inferenceFrameReady = false;
+	tf->inferenceThread = std::thread(inference_thread_loop, tf);
+
+	return tf;
+}
+
+void detect_filter_destroy(void *data)
+{
+	obs_log(LOG_INFO, "Detect filter destroyed");
+
+	struct detect_filter *tf = reinterpret_cast<detect_filter *>(data);
+
+	if (tf) {
+		tf->isDisabled = true;
+
+		tf->stopInferenceThread = true;
+		tf->inferenceCV.notify_all();
+		if (tf->inferenceThread.joinable()) {
+			tf->inferenceThread.join();
+		}
+
+		obs_enter_graphics();
+		gs_texrender_destroy(tf->texrender);
+		if (tf->stagesurface) {
+			gs_stagesurface_destroy(tf->stagesurface);
+		}
+		gs_effect_destroy(tf->kawaseBlurEffect);
+		gs_effect_destroy(tf->maskingEffect);
+		obs_leave_graphics();
+		tf->~detect_filter();
+		bfree(tf);
+	}
+}
+
+static void inference_thread_loop(struct detect_filter *tf)
+{
+	obs_log(LOG_INFO, "Inference thread started");
+	while (!tf->stopInferenceThread) {
+		cv::Mat imageBGRA;
+		{
+			std::unique_lock<std::mutex> lock(tf->inferenceMutex);
+			tf->inferenceCV.wait(lock, [tf] {
+				return tf->inferenceFrameReady || tf->stopInferenceThread;
+			});
+
+			if (tf->stopInferenceThread) {
+				break;
+			}
+
+			imageBGRA = tf->inferenceInputFrame.clone();
+			tf->inferenceFrameReady = false;
+			tf->isInferencing = true;
+		}
+
+		run_model_inference(tf, imageBGRA);
+	}
+	obs_log(LOG_INFO, "Inference thread stopped");
+}
+
+void detect_filter_video_tick(void *data, float seconds)
+{
+	UNUSED_PARAMETER(seconds);
+
+	struct detect_filter *tf = reinterpret_cast<detect_filter *>(data);
+
+	if (tf->isDisabled || !tf->onnxruntimemodel || !obs_source_enabled(tf->source)) {
+		return;
+	}
+
+	cv::Mat imageBGRA;
+	{
+		std::unique_lock<std::mutex> lock(tf->inputBGRALock, std::try_to_lock);
+		if (!lock.owns_lock() || tf->inputBGRA.empty()) {
+			return;
+		}
+		imageBGRA = tf->inputBGRA.clone();
+	}
+
+	if (tf->syncMode) {
+		run_model_inference(tf, imageBGRA);
+	} else {
+		std::unique_lock<std::mutex> lock(tf->inferenceMutex, std::try_to_lock);
+		if (lock.owns_lock() && !tf->isInferencing) {
+			tf->inferenceInputFrame = imageBGRA;
+			tf->inferenceFrameReady = true;
+			tf->inferenceCV.notify_one();
+		}
+	}
+
 	if (tf->trackingEnabled && tf->trackingFilter) {
 		const int width = imageBGRA.cols;
 		const int height = imageBGRA.rows;
+
+		std::vector<Object> objects;
+		{
+			std::lock_guard<std::mutex> lock(tf->outputLock);
+			objects = tf->latestObjects;
+		}
 
 		cv::Rect2f boundingBox = cv::Rect2f(0, 0, (float)width, (float)height);
 		// get location of the objects
@@ -1091,8 +1419,18 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 			outputMask = tf->outputMask.clone();
 		}
 
-		gs_texture_t *tex = gs_texture_create(width, height, GS_BGRA, 1,
+		gs_texture_t *tex = nullptr;
+		bool destroy_tex = false;
+		
+		if (tf->preview || tf->debugMode) {
+			tex = gs_texture_create(width, height, GS_BGRA, 1,
 						      (const uint8_t **)&outputBGRA.data, 0);
+			destroy_tex = true;
+		} else {
+			tex = gs_texrender_get_texture(tf->texrender);
+			destroy_tex = false;
+		}
+
 		gs_texture_t *maskTexture = nullptr;
 		std::string technique_name = "Draw";
 		gs_eparam_t *imageParam = gs_effect_get_param_by_name(tf->maskingEffect, "image");
@@ -1108,12 +1446,14 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 			if (tf->maskingType == "output_mask") {
 				technique_name = "DrawMask";
 			} else if (tf->maskingType == "blur") {
-				gs_texture_destroy(tex);
+				if (destroy_tex) gs_texture_destroy(tex);
 				tex = blur_image(tf, width, height, maskTexture);
+				destroy_tex = true;
 			} else if (tf->maskingType == "pixelate") {
-				gs_texture_destroy(tex);
+				if (destroy_tex) gs_texture_destroy(tex);
 				tex = pixelate_image(tf, width, height, maskTexture,
 						     (float)tf->maskingBlurRadius);
+				destroy_tex = true;
 			} else if (tf->maskingType == "transparent") {
 				technique_name = "DrawSolidColor";
 				gs_effect_set_color(maskColorParam, 0);
@@ -1129,8 +1469,12 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 			gs_draw_sprite(tex, 0, 0, 0);
 		}
 
-		gs_texture_destroy(tex);
-		gs_texture_destroy(maskTexture);
+		if (destroy_tex) {
+			gs_texture_destroy(tex);
+		}
+		if (maskTexture) {
+			gs_texture_destroy(maskTexture);
+		}
 	} else {
 		obs_source_skip_video_filter(tf->source);
 	}

@@ -71,11 +71,25 @@ static void draw_objects(cv::Mat bgr, const std::vector<Object> &objects,
 			txt_color = cv::Scalar(255, 255, 255);
 		}
 
+		if (obj.isUnconfirmed) {
+			color = cv::Scalar(0.5, 0.5, 0.5); // Gray
+			txt_color = cv::Scalar(255, 255, 255);
+		} else if (obj.isExempt) {
+			color = cv::Scalar(0, 0, 1.0); // Red
+			txt_color = cv::Scalar(255, 255, 255);
+		}
+
 		cv::rectangle(bgr, obj.rect, color * 255, 2);
 
 		char text[256];
-		snprintf(text, sizeof(text), "%s %.1f%%", class_names[obj.label].c_str(),
-			 obj.prob * 100);
+		if (obj.isUnconfirmed) {
+			snprintf(text, sizeof(text), "Unconfirmed / 미확정");
+		} else if (obj.isExempt) {
+			snprintf(text, sizeof(text), "Exempted / 제외됨");
+		} else {
+			snprintf(text, sizeof(text), "%s %.1f%%", class_names[obj.label].c_str(),
+				 obj.prob * 100);
+		}
 
 		int baseLine = 0;
 		cv::Size label_size =

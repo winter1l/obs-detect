@@ -4,6 +4,8 @@
 #include <obs-module.h>
 #include "ort-model/ONNXRuntimeModel.h"
 #include "sort/Sort.h"
+#include <unordered_map>
+#include <unordered_set>
 
 /**
   * @brief The filter_data struct
@@ -18,12 +20,20 @@ struct filter_data {
 	std::string modelSize;
 
 	int minAreaThreshold;
+	bool enableExclude;
+	float maxAreaRatio;
+	float excludeSecondsThreshold;
+	bool keepExemptUntilLost;
+	float exemptDropoffRatio;
+	bool excludeSingleOnly;
+	int minHitFrames;
 	int objectCategory;
 	bool maskingEnabled;
 	std::string maskingType;
 	int maskingColor;
 	int maskingBlurRadius;
 	int maskingDilateIterations;
+	bool maskingDynamicExpansion;
 	bool trackingEnabled;
 	float zoomFactor;
 	float zoomSpeedFactor;
@@ -42,6 +52,8 @@ struct filter_data {
 
 	// create SORT tracker
 	Sort tracker;
+	std::unordered_map<uint64_t, uint64_t> largeFramesCount;
+	std::unordered_set<uint64_t> exemptIds;
 
 	obs_source_t *source;
 	gs_texrender_t *texrender;
@@ -50,9 +62,17 @@ struct filter_data {
 	gs_effect_t *maskingEffect;
 	gs_effect_t *pixelateEffect;
 
+	bool syncMode;
+
 	cv::Mat inputBGRA;
 	cv::Mat outputPreviewBGRA;
 	cv::Mat outputMask;
+	std::vector<Object> latestObjects;
+
+	// Debug
+	bool debugMode;
+	float currentInferenceTimeMs;
+	float currentInferenceFPS;
 
 	bool isDisabled;
 	bool preview;
@@ -60,6 +80,16 @@ struct filter_data {
 	std::mutex inputBGRALock;
 	std::mutex outputLock;
 	std::mutex modelMutex;
+
+	// Inference background thread
+	std::thread inferenceThread;
+	std::atomic<bool> stopInferenceThread;
+	std::mutex inferenceMutex;
+	std::condition_variable inferenceCV;
+	std::atomic<bool> isInferencing;
+	cv::Mat inferenceInputFrame;
+	cv::Rect inferenceCropRect;
+	bool inferenceFrameReady;
 
 	std::unique_ptr<ONNXRuntimeModel> onnxruntimemodel;
 	std::vector<std::string> classNames;

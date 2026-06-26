@@ -4,6 +4,8 @@
 #include <opencv2/core/types.hpp>
 #include <opencv2/video/tracking.hpp>
 
+#include <deque>
+
 #ifdef _WIN32
 #define file_name_t std::wstring
 #else
@@ -17,6 +19,10 @@ struct Object {
 	uint64_t id;
 	uint64_t unseenFrames;
 	cv::KalmanFilter kf;
+	std::deque<cv::Rect_<float>> lastVisibleRects;
+	int hitFrames = 0;
+	bool isExempt = false;
+	bool isUnconfirmed = false;
 };
 
 struct GridAndStride {

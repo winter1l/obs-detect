@@ -15,7 +15,9 @@
 #define INF std::numeric_limits<float>::infinity()
 
 // Constructor
-Sort::Sort(size_t maxUnseenFrames_) : nextTrackID(0), maxUnseenFrames(maxUnseenFrames_) {}
+Sort::Sort(size_t maxUnseenFrames) : nextTrackID(0), maxUnseenFrames(maxUnseenFrames), minHitFrames(1)
+{
+}
 
 // Destructor
 Sort::~Sort() {}
@@ -105,11 +107,35 @@ std::vector<Object> Sort::update(const std::vector<Object> &detections)
 
 		// No detections, predict the next state of the existing tracks and update unseen frames
 		for (size_t i = 0; i < trackedObjects.size(); ++i) {
-			trackedObjects[i].rect = predict(trackedObjects[i].kf);
+			if (trackedObjects[i].lastVisibleRects.size() > 1) {
+				const auto &rects = trackedObjects[i].lastVisibleRects;
+				int n = (int)rects.size();
+				float dx = (rects.back().x - rects.front().x) / (n - 1);
+				float dy = (rects.back().y - rects.front().y) / (n - 1);
+				float dw = (rects.back().width - rects.front().width) / (n - 1);
+				float dh = (rects.back().height - rects.front().height) / (n - 1);
+				float max_dx = trackedObjects[i].rect.width * 0.5f;
+				float max_dy = trackedObjects[i].rect.height * 0.5f;
+				dx = std::max(-max_dx, std::min(max_dx, dx));
+				dy = std::max(-max_dy, std::min(max_dy, dy));
+				dw = std::max(-max_dx, std::min(max_dx, dw));
+				dh = std::max(-max_dy, std::min(max_dy, dh));
+
+				trackedObjects[i].rect.x += dx;
+				trackedObjects[i].rect.y += dy;
+				trackedObjects[i].rect.width += dw;
+				trackedObjects[i].rect.height += dh;
+				predict(trackedObjects[i].kf); // update internal KF state
+			} else {
+				predict(trackedObjects[i].kf); // update internal KF state but keep rect stationary
+			}
 			trackedObjects[i].unseenFrames++;
 
+			bool can_predict = trackedObjects[i].lastVisibleRects.size() > 1;
 			// Remove lost tracks
-			if (trackedObjects[i].unseenFrames < this->maxUnseenFrames) {
+			if (trackedObjects[i].unseenFrames < this->maxUnseenFrames &&
+			    trackedObjects[i].hitFrames >= this->minHitFrames &&
+			    can_predict) {
 				newTrackedObjects.push_back(trackedObjects[i]);
 			}
 		}
@@ -126,13 +152,36 @@ std::vector<Object> Sort::update(const std::vector<Object> &detections)
 			trackedObjects.back().kf = kf; // store the Kalman filter in the object
 			trackedObjects.back().id = nextTrackID++;
 			trackedObjects.back().unseenFrames = 0;
+			trackedObjects.back().hitFrames = 1;
+			trackedObjects.back().lastVisibleRects.push_back(detection.rect);
 		}
 		return trackedObjects;
 	}
 
 	// Predict new locations of existing tracked objects
 	for (size_t i = 0; i < trackedObjects.size(); ++i) {
-		trackedObjects[i].rect = predict(trackedObjects[i].kf);
+		if (trackedObjects[i].lastVisibleRects.size() > 1) {
+			const auto &rects = trackedObjects[i].lastVisibleRects;
+			int n = (int)rects.size();
+			float dx = (rects.back().x - rects.front().x) / (n - 1);
+			float dy = (rects.back().y - rects.front().y) / (n - 1);
+			float dw = (rects.back().width - rects.front().width) / (n - 1);
+			float dh = (rects.back().height - rects.front().height) / (n - 1);
+			float max_dx = trackedObjects[i].rect.width * 0.5f;
+			float max_dy = trackedObjects[i].rect.height * 0.5f;
+			dx = std::max(-max_dx, std::min(max_dx, dx));
+			dy = std::max(-max_dy, std::min(max_dy, dy));
+			dw = std::max(-max_dx, std::min(max_dx, dw));
+			dh = std::max(-max_dy, std::min(max_dy, dh));
+
+			trackedObjects[i].rect.x += dx;
+			trackedObjects[i].rect.y += dy;
+			trackedObjects[i].rect.width += dw;
+			trackedObjects[i].rect.height += dh;
+			predict(trackedObjects[i].kf); // update internal KF state
+		} else {
+			predict(trackedObjects[i].kf); // update internal KF state but keep rect stationary
+		}
 	}
 
 	// Build the cost matrix for the Hungarian algorithm
@@ -143,7 +192,7 @@ std::vector<Object> Sort::update(const std::vector<Object> &detections)
 	for (size_t i = 0; i < trackedObjects.size(); ++i) {
 		for (size_t j = 0; j < numDetections; ++j) {
 			const float iou = computeIoU(trackedObjects[i].rect, detections[j].rect);
-			costMatrix[i][j] = iou > 0.0f ? 1.0f - iou : 10.0f;
+			costMatrix[i][j] = iou >= this->iouThreshold ? 1.0f - iou : 10.0f;
 		}
 	}
 
@@ -159,14 +208,27 @@ std::vector<Object> Sort::update(const std::vector<Object> &detections)
 			if (costMatrix[i][j] == 0) {
 				const float iou =
 					computeIoU(trackedObjects[i].rect, detections[j].rect);
-				if (iou == 0) {
-					// prevent matching detections without any overlap
+				if (iou < this->iouThreshold) {
+					// prevent matching detections with low overlap
 					continue;
+				}
+				if (trackedObjects[i].unseenFrames > 0) {
+					trackedObjects[i].lastVisibleRects.clear();
 				}
 				// update the tracked object with the new detection
 				trackedObjects[i].rect = updateKalmanFilter(trackedObjects[i].kf,
 									    detections[j].rect);
 				trackedObjects[i].unseenFrames = 0;
+				trackedObjects[i].hitFrames++;
+				if (this->instantTrackAreaRatio > 0.0f && this->screenArea > 0.0f) {
+					if (detections[j].rect.area() >= this->screenArea * (this->instantTrackAreaRatio / 100.0f)) {
+						trackedObjects[i].hitFrames = std::max(trackedObjects[i].hitFrames, this->minHitFrames);
+					}
+				}
+				trackedObjects[i].lastVisibleRects.push_back(trackedObjects[i].rect);
+				if (trackedObjects[i].lastVisibleRects.size() > 3) {
+					trackedObjects[i].lastVisibleRects.pop_front();
+				}
 				trackedObjects[i].label = detections[j].label;
 				trackedObjects[i].prob = detections[j].prob;
 				// mark the detection and the tracked object as used
@@ -186,6 +248,13 @@ std::vector<Object> Sort::update(const std::vector<Object> &detections)
 			trackedObjects.back().kf = kf; // store the Kalman filter in the object
 			trackedObjects.back().id = nextTrackID++;
 			trackedObjects.back().unseenFrames = 0;
+			trackedObjects.back().hitFrames = 1;
+			if (this->instantTrackAreaRatio > 0.0f && this->screenArea > 0.0f) {
+				if (detections[j].rect.area() >= this->screenArea * (this->instantTrackAreaRatio / 100.0f)) {
+					trackedObjects.back().hitFrames = this->minHitFrames;
+				}
+			}
+			trackedObjects.back().lastVisibleRects.push_back(detections[j].rect);
 			// resize trackedObjectUsed to match the new size of trackedObjects
 			trackedObjectUsed.resize(trackedObjects.size(), true);
 		}
@@ -195,8 +264,11 @@ std::vector<Object> Sort::update(const std::vector<Object> &detections)
 	std::vector<Object> newTrackedObjects;
 	std::vector<int> newTrackIDs;
 	for (size_t i = 0; i < trackedObjects.size(); ++i) {
+		bool can_predict = trackedObjects[i].lastVisibleRects.size() > 1;
 		if (trackedObjectUsed[i] ||
-		    trackedObjects[i].unseenFrames < this->maxUnseenFrames) {
+		    (trackedObjects[i].unseenFrames < this->maxUnseenFrames &&
+		     trackedObjects[i].hitFrames >= this->minHitFrames &&
+		     can_predict)) {
 			newTrackedObjects.push_back(trackedObjects[i]);
 			if (!trackedObjectUsed[i]) {
 				newTrackedObjects.back().unseenFrames++;
