@@ -610,11 +610,9 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	tf->objectCategory = (int)obs_data_get_int(settings, "object_category");
 	tf->enableFaceExclusion = obs_data_get_bool(settings, "enable_face_exclusion");
 	const char *ref_path = obs_data_get_string(settings, "reference_face_path");
-	if (ref_path && strlen(ref_path) > 0) {
-		tf->referenceFacePath = ref_path;
-	} else {
-		tf->referenceFacePath = "";
-	}
+	std::string newRefPath = (ref_path && strlen(ref_path) > 0) ? ref_path : "";
+	bool refPathChanged = (tf->referenceFacePath != newRefPath);
+	tf->referenceFacePath = newRefPath;
 	tf->faceMatchThreshold = (float)obs_data_get_double(settings, "face_match_threshold");
 	tf->personCategory = (int)obs_data_get_int(settings, "person_category");
 	tf->minFaceAreaRatio = (float)obs_data_get_double(settings, "min_face_area_ratio");
@@ -861,7 +859,8 @@ void detect_filter_update(void *data, obs_data_t *settings)
 
 			// Pre-calculate reference face features
 			if (!tf->referenceFacePath.empty() && tf->yunetModel && tf->sfaceModel) {
-				tf->referenceFaceFeatures.clear();
+				if (reinitialize || refPathChanged || tf->referenceFaceFeatures.empty()) {
+					tf->referenceFaceFeatures.clear();
 #ifdef _WIN32
 				int p_len = MultiByteToWideChar(CP_UTF8, 0, tf->referenceFacePath.c_str(), -1, nullptr, 0);
 				std::wstring p_wstr(p_len, L'\0');
@@ -919,6 +918,7 @@ void detect_filter_update(void *data, obs_data_t *settings)
 					obs_log(LOG_INFO, "Reference faces loaded successfully: %d images", successCount);
 				} else {
 					obs_log(LOG_WARNING, "No valid faces detected in the reference face path: %s", tf->referenceFacePath.c_str());
+				}
 				}
 			} else {
 				tf->referenceFaceFeatures.clear();
