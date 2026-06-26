@@ -2,7 +2,14 @@
 
 #include <onnxruntime_cxx_api.h>
 
+#include "sface/SFace.h"
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 #ifdef _WIN32
+#define NOMINMAX
+#include <util/dstr.h>
 #include <wchar.h>
 #include <windows.h>
 #endif // _WIN32
@@ -853,10 +860,25 @@ void detect_filter_update(void *data, obs_data_t *settings)
 				int p_len = MultiByteToWideChar(CP_UTF8, 0, tf->referenceFacePath.c_str(), -1, nullptr, 0);
 				std::wstring p_wstr(p_len, L'\0');
 				MultiByteToWideChar(CP_UTF8, 0, tf->referenceFacePath.c_str(), -1, p_wstr.data(), p_len);
-				// cv::imread with wstring is not standard, we must use utf8 path or convert for imread if possible.
-				// OpenCV 4+ imread handles UTF8 on Windows. Let's just use the string.
+				if (p_len > 0 && p_wstr.back() == L'\0') {
+					p_wstr.pop_back();
+				}
+				FILE* f = _wfopen(p_wstr.c_str(), L"rb");
+#else
+				FILE* f = fopen(tf->referenceFacePath.c_str(), "rb");
 #endif
-				cv::Mat refImg = cv::imread(tf->referenceFacePath, cv::IMREAD_COLOR);
+				cv::Mat refImg;
+				if (f) {
+					int width, height, channels;
+					unsigned char *data = stbi_load_from_file(f, &width, &height, &channels, 3);
+					fclose(f);
+					if (data) {
+						cv::Mat img(height, width, CV_8UC3, data);
+						cv::cvtColor(img, refImg, cv::COLOR_RGB2BGR);
+						stbi_image_free(data);
+					}
+				}
+				
 				if (!refImg.empty()) {
 					std::vector<Object> faces = tf->yunetModel->inference(refImg);
 					if (!faces.empty()) {
