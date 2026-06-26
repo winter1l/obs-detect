@@ -1710,7 +1710,7 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 			if (!tf->previewTexture || tf->lastTexWidth != width || tf->lastTexHeight != height) {
 				if (tf->previewTexture) gs_texture_destroy(tf->previewTexture);
 				tf->previewTexture = gs_texture_create(width, height, GS_BGRA, 1,
-							      (const uint8_t **)&outputBGRA.data, 0);
+							      (const uint8_t **)&outputBGRA.data, GS_DYNAMIC);
 			} else {
 				gs_texture_set_image(tf->previewTexture, outputBGRA.data, width * 4, false);
 			}
@@ -1732,7 +1732,7 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 			if (!tf->renderMaskTexture || tf->lastTexWidth != width || tf->lastTexHeight != height) {
 				if (tf->renderMaskTexture) gs_texture_destroy(tf->renderMaskTexture);
 				tf->renderMaskTexture = gs_texture_create(width, height, GS_R8, 1,
-								(const uint8_t **)&outputMask.data, 0);
+								(const uint8_t **)&outputMask.data, GS_DYNAMIC);
 			} else {
 				gs_texture_set_image(tf->renderMaskTexture, outputMask.data, width, false);
 			}
