@@ -1049,11 +1049,11 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 			if (obj.label != tf->personCategory) continue;
 
 			// Check Cache
-			if (tf->faceStatusCache.count(obj.id)) {
+			if (tf->faceStatusCache.count(obj.id) && tf->faceStatusCache[obj.id] != filter_data::FaceStatus::UNKNOWN) {
 				if (tf->faceStatusCache[obj.id] == filter_data::FaceStatus::IS_ME) {
 					tf->faceExemptIds.insert(obj.id);
 				}
-				continue; // Skip YuNet if already checked
+				continue; // Skip YuNet if already resolved (IS_ME or NOT_ME)
 			}
 
 			// Throttle and Size Check
@@ -1065,11 +1065,13 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 				cv::Rect crop_rect = upper_body_rect & cv::Rect_<float>(0, 0, (float)imageBGRA.cols, (float)imageBGRA.rows);
 				if (crop_rect.width > 0 && crop_rect.height > 0) {
 					cv::Mat cropped = imageBGRA(crop_rect);
+					cv::Mat croppedBGR;
+					cv::cvtColor(cropped, croppedBGR, cv::COLOR_BGRA2BGR);
 					
-					std::vector<Object> faces = tf->yunetModel->inference(cropped);
+					std::vector<Object> faces = tf->yunetModel->inference(croppedBGR);
 					bool is_me = false;
 					if (!faces.empty()) {
-						std::vector<float> feat = tf->sfaceModel->inference(cropped, faces[0].landmarks);
+						std::vector<float> feat = tf->sfaceModel->inference(croppedBGR, faces[0].landmarks);
 						float sim = sface::SFaceONNX::match(feat, tf->referenceFaceFeature);
 						if (sim >= tf->faceMatchThreshold) {
 							is_me = true;
