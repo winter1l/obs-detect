@@ -38,7 +38,7 @@ struct filter_data {
 
 	enum FaceStatus { UNKNOWN, CHECKING, IS_ME, NOT_ME };
 	std::unordered_map<uint64_t, FaceStatus> faceStatusCache;
-	std::vector<float> referenceFaceFeature;
+	std::vector<std::vector<float>> referenceFaceFeatures;
 
 	std::unique_ptr<yunet::YuNetONNX> yunetModel;
 	std::unique_ptr<sface::SFaceONNX> sfaceModel;

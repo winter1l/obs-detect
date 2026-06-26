@@ -23,6 +23,7 @@
 #include <fstream>
 #include <string>
 #include <chrono>
+#include <filesystem>
 #include <new>
 #include <mutex>
 #include <regex>
@@ -188,7 +189,7 @@ obs_properties_t *detect_filter_properties(void *data)
 
 	obs_property_t *reference_face_path =
 		obs_properties_add_path(props, "reference_face_path", obs_module_text("ReferenceFaceImage"),
-					OBS_PATH_FILE, "Image files (*.png *.jpg *.jpeg *.bmp);;All files (*.*)", nullptr);
+					OBS_PATH_DIRECTORY, "", nullptr);
 					
 	obs_property_t *face_match_threshold =
 		obs_properties_add_float_slider(props, "face_match_threshold", obs_module_text("FaceMatchThreshold"),
@@ -854,57 +855,80 @@ void detect_filter_update(void *data, obs_data_t *settings)
 			if (yunet_raw) bfree(yunet_raw);
 			if (sface_raw) bfree(sface_raw);
 
-			// Pre-calculate reference face feature
+			// Pre-calculate reference face features
 			if (!tf->referenceFacePath.empty() && tf->yunetModel && tf->sfaceModel) {
+				tf->referenceFaceFeatures.clear();
 #ifdef _WIN32
 				int p_len = MultiByteToWideChar(CP_UTF8, 0, tf->referenceFacePath.c_str(), -1, nullptr, 0);
 				std::wstring p_wstr(p_len, L'\0');
 				MultiByteToWideChar(CP_UTF8, 0, tf->referenceFacePath.c_str(), -1, p_wstr.data(), p_len);
-				if (p_len > 0 && p_wstr.back() == L'\0') {
-					p_wstr.pop_back();
-				}
-				FILE* f = _wfopen(p_wstr.c_str(), L"rb");
+				if (p_len > 0 && p_wstr.back() == L'\0') p_wstr.pop_back();
+				std::filesystem::path refPath(p_wstr);
 #else
-				FILE* f = fopen(tf->referenceFacePath.c_str(), "rb");
+				std::filesystem::path refPath(tf->referenceFacePath);
 #endif
-				cv::Mat refImg;
-				if (f) {
-					int width, height, channels;
-					unsigned char *data = stbi_load_from_file(f, &width, &height, &channels, 3);
-					fclose(f);
-					if (data) {
-						cv::Mat img(height, width, CV_8UC3, data);
-						cv::cvtColor(img, refImg, cv::COLOR_RGB2BGR);
-						stbi_image_free(data);
+				std::vector<std::filesystem::path> filesToProcess;
+				try {
+					if (std::filesystem::is_directory(refPath)) {
+						for (const auto& entry : std::filesystem::directory_iterator(refPath)) {
+							if (entry.is_regular_file()) {
+								filesToProcess.push_back(entry.path());
+							}
+						}
+					} else if (std::filesystem::is_regular_file(refPath)) {
+						filesToProcess.push_back(refPath);
+					}
+				} catch (const std::exception& e) {
+					obs_log(LOG_ERROR, "Failed to read reference face path: %s", e.what());
+				}
+				
+				int successCount = 0;
+				for (const auto& filePath : filesToProcess) {
+#ifdef _WIN32
+					FILE* f = _wfopen(filePath.wstring().c_str(), L"rb");
+#else
+					FILE* f = fopen(filePath.string().c_str(), "rb");
+#endif
+					cv::Mat refImg;
+					if (f) {
+						int width, height, channels;
+						unsigned char *data = stbi_load_from_file(f, &width, &height, &channels, 3);
+						fclose(f);
+						if (data) {
+							cv::Mat img(height, width, CV_8UC3, data);
+							cv::cvtColor(img, refImg, cv::COLOR_RGB2BGR);
+							stbi_image_free(data);
+						}
+					}
+					
+					if (!refImg.empty()) {
+						std::vector<Object> faces = tf->yunetModel->inference(refImg);
+						if (!faces.empty()) {
+							std::vector<float> feat = tf->sfaceModel->inference(refImg, faces[0].landmarks);
+							tf->referenceFaceFeatures.push_back(feat);
+							successCount++;
+						}
 					}
 				}
 				
-				if (!refImg.empty()) {
-					std::vector<Object> faces = tf->yunetModel->inference(refImg);
-					if (!faces.empty()) {
-						tf->referenceFaceFeature = tf->sfaceModel->inference(refImg, faces[0].landmarks);
-						obs_log(LOG_INFO, "Reference face loaded and feature extracted successfully.");
-					} else {
-						obs_log(LOG_WARNING, "No face detected in reference image.");
-						tf->referenceFaceFeature.clear();
-					}
+				if (successCount > 0) {
+					obs_log(LOG_INFO, "Reference faces loaded successfully: %d images", successCount);
 				} else {
-					obs_log(LOG_WARNING, "Could not read reference face image: %s", tf->referenceFacePath.c_str());
-					tf->referenceFaceFeature.clear();
+					obs_log(LOG_WARNING, "No valid faces detected in the reference face path: %s", tf->referenceFacePath.c_str());
 				}
 			} else {
-				tf->referenceFaceFeature.clear();
+				tf->referenceFaceFeatures.clear();
 			}
 		} catch (const std::exception &e) {
 			obs_log(LOG_ERROR, "Failed to load face recognition models: %s", e.what());
 			tf->yunetModel.reset();
 			tf->sfaceModel.reset();
-			tf->referenceFaceFeature.clear();
+			tf->referenceFaceFeatures.clear();
 		}
 	} else {
 		tf->yunetModel.reset();
 		tf->sfaceModel.reset();
-		tf->referenceFaceFeature.clear();
+		tf->referenceFaceFeatures.clear();
 		tf->faceStatusCache.clear();
 		tf->faceExemptIds.clear();
 	}
@@ -1061,7 +1085,7 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 
 	std::vector<Object> all_objects; // for preview
 
-	if (tf->enableFaceExclusion && tf->sortTracking && tf->yunetModel && tf->sfaceModel && !tf->referenceFaceFeature.empty()) {
+	if (tf->enableFaceExclusion && tf->sortTracking && tf->yunetModel && tf->sfaceModel && !tf->referenceFaceFeatures.empty()) {
 		std::unordered_set<uint64_t> current_ids;
 		float screenArea = (float)(imageBGRA.cols * imageBGRA.rows);
 		float minPersonAreaPixels = screenArea * (tf->minFaceAreaRatio / 100.0f); // use as min person size to save perf
@@ -1074,6 +1098,9 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 			if (tf->faceStatusCache.count(obj.id) && tf->faceStatusCache[obj.id] == filter_data::FaceStatus::IS_ME) {
 				tf->faceExemptIds.insert(obj.id);
 				continue; // Skip YuNet if already resolved as IS_ME
+			}
+			if (tf->faceStatusCache.count(obj.id) && tf->faceStatusCache[obj.id] == filter_data::FaceStatus::CHECKING) {
+				continue;
 			}
 
 			// Throttle and Size Check (Re-evaluate NOT_ME every 30 frames, UNKNOWN every 10 frames)
@@ -1097,9 +1124,13 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 						bool is_me = false;
 						if (!faces.empty()) {
 							std::vector<float> feat = tf->sfaceModel->inference(croppedBGR, faces[0].landmarks);
-							float sim = sface::SFaceONNX::match(feat, tf->referenceFaceFeature);
-							obs_log(LOG_INFO, "Face matched for obj %llu: similarity %.3f (threshold %.3f)", (unsigned long long)obj.id, sim, tf->faceMatchThreshold);
-							if (sim >= tf->faceMatchThreshold) {
+							float max_sim = -1.0f;
+							for (const auto& refFeat : tf->referenceFaceFeatures) {
+								float sim = sface::SFaceONNX::match(feat, refFeat);
+								if (sim > max_sim) max_sim = sim;
+							}
+							obs_log(LOG_INFO, "Face matched for obj %llu: similarity %.3f (threshold %.3f)", (unsigned long long)obj.id, max_sim, tf->faceMatchThreshold);
+							if (max_sim >= tf->faceMatchThreshold) {
 								is_me = true;
 							}
 						} else {
