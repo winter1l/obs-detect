@@ -22,16 +22,11 @@ struct filter_data {
 	std::string modelSize;
 
 	int minAreaThreshold;
-	bool enableExclude;
-	float maxAreaRatio;
-	float excludeSecondsThreshold;
-	bool keepExemptUntilLost;
-	float exemptDropoffRatio;
-	bool excludeSingleOnly;
 	int minHitFrames;
 	int objectCategory;
 	bool enableFaceExclusion;
 	std::string referenceFacePath;
+	int maxReferenceImages;
 	float faceMatchThreshold;
 	int personCategory;
 	float minFaceAreaRatio;
@@ -43,6 +38,7 @@ struct filter_data {
 
 	gs_texture_t *previewTexture = nullptr;
 	gs_texture_t *renderMaskTexture = nullptr;
+	gs_texture_t *overlayTexture = nullptr;
 	uint32_t lastTexWidth = 0;
 	uint32_t lastTexHeight = 0;
 
@@ -72,8 +68,6 @@ struct filter_data {
 
 	// create SORT tracker
 	Sort tracker;
-	std::unordered_map<uint64_t, uint64_t> largeFramesCount;
-	std::unordered_set<uint64_t> exemptIds;
 	std::unordered_set<uint64_t> faceExemptIds;
 
 	obs_source_t *source;
@@ -87,6 +81,7 @@ struct filter_data {
 
 	cv::Mat inputBGRA;
 	cv::Mat outputPreviewBGRA;
+	cv::Mat outputOverlayBGRA;
 	cv::Mat outputMask;
 	std::vector<Object> latestObjects;
 
