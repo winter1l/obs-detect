@@ -22,11 +22,11 @@ struct filter_data {
 	std::string modelSize;
 
 	int minAreaThreshold;
+	int maxExemptPersons;
 	int minHitFrames;
 	int objectCategory;
 	bool enableFaceExclusion;
 	std::string referenceFacePath;
-	int maxReferenceImages;
 	float faceMatchThreshold;
 	int personCategory;
 	float minFaceAreaRatio;
@@ -38,7 +38,6 @@ struct filter_data {
 
 	gs_texture_t *previewTexture = nullptr;
 	gs_texture_t *renderMaskTexture = nullptr;
-	gs_texture_t *overlayTexture = nullptr;
 	uint32_t lastTexWidth = 0;
 	uint32_t lastTexHeight = 0;
 
@@ -81,7 +80,6 @@ struct filter_data {
 
 	cv::Mat inputBGRA;
 	cv::Mat outputPreviewBGRA;
-	cv::Mat outputOverlayBGRA;
 	cv::Mat outputMask;
 	std::vector<Object> latestObjects;
 

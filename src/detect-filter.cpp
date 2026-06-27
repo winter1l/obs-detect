@@ -70,13 +70,13 @@ static bool enable_advanced_settings(obs_properties_t *ppts, obs_property_t *p,
 	for (const char *prop_name :
 	     {"threshold", "useGPU", "numThreads", "model_size", "detected_object", "sort_tracking",
 	      "max_unseen_frames", "show_unseen_objects", "save_detections_path", "crop_group",
-	      "min_size_threshold", "min_hit_frames", "enable_face_exclusion"}) {
+	      "min_size_threshold", "min_hit_frames", "enable_exclude", "enable_face_exclusion"}) {
 		p = obs_properties_get(ppts, prop_name);
 		obs_property_set_visible(p, enabled);
 	}
 
 	bool face_exclude_enabled = enabled && obs_data_get_bool(settings, "enable_face_exclusion");
-	for (const char *prop_name : {"reference_face_path", "max_reference_images", "face_match_threshold", "person_category", "min_face_area_ratio", "face_inference_interval"}) {
+	for (const char *prop_name : {"face_category", "person_category", "min_face_area_ratio", "face_inference_interval", "max_exempt_persons", "reference_face_path", "face_match_threshold"}) {
 		p = obs_properties_get(ppts, prop_name);
 		if (p) {
 			obs_property_set_visible(p, face_exclude_enabled);
@@ -352,26 +352,12 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_add_float_slider(props, "threshold", obs_module_text("ConfThreshold"), 0.10,
 					1.0, 0.025);
 
-	// add minimal size threshold slider
 	obs_properties_add_int_slider(props, "min_size_threshold",
 				      obs_module_text("MinSizeThreshold"), 0, 10000, 1);
-
 	obs_property_t *enable_face_exclusion = obs_properties_add_bool(props, "enable_face_exclusion", obs_module_text("EnableFaceExclusion"));
-	obs_properties_add_path(props, "reference_face_path", obs_module_text("ReferenceFaceImage"), OBS_PATH_DIRECTORY, "", nullptr);
-	obs_properties_add_int_slider(props, "max_reference_images", obs_module_text("MaxReferenceImages"), 1, 10, 1);
 	obs_property_t *min_face_area_ratio = obs_properties_add_float_slider(props, "min_face_area_ratio", obs_module_text("MinFaceAreaRatio"), 0.0, 100.0, 0.1);
 	obs_property_t *face_inference_interval = obs_properties_add_int_slider(props, "face_inference_interval", obs_module_text("FaceInferenceInterval"), 1, 120, 1);
-
-	obs_property_set_modified_callback(enable_face_exclusion, [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
-		const bool enabled = obs_data_get_bool(settings, "enable_face_exclusion") && obs_data_get_bool(settings, "advanced");
-		obs_property_set_visible(obs_properties_get(props_, "reference_face_path"), enabled);
-		obs_property_set_visible(obs_properties_get(props_, "max_reference_images"), enabled);
-		obs_property_set_visible(obs_properties_get(props_, "face_match_threshold"), enabled);
-		obs_property_set_visible(obs_properties_get(props_, "person_category"), enabled);
-		obs_property_set_visible(obs_properties_get(props_, "min_face_area_ratio"), enabled);
-		obs_property_set_visible(obs_properties_get(props_, "face_inference_interval"), enabled);
-		return true;
-	});
+	obs_property_t *max_exempt_persons = obs_properties_add_int_slider(props, "max_exempt_persons", obs_module_text("MaxExemptPersons"), 1, 10, 1);
 
 	// add SORT tracking enabled checkbox
 	obs_property_t *sort_tracking = obs_properties_add_bool(props, "sort_tracking", obs_module_text("SORTTracking"));
@@ -521,11 +507,15 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_string(settings, "useGPU", USEGPU_CPU);
 #endif
 	obs_data_set_default_bool(settings, "sort_tracking", true);
+	obs_data_set_default_bool(settings, "show_unseen_objects", false);
+	obs_data_set_default_bool(settings, "preview", false);
 	obs_data_set_default_bool(settings, "sync_mode", false);
 	obs_data_set_default_bool(settings, "debug_mode", false);
-	obs_data_set_default_int(settings, "min_hit_frames", 1);
-	obs_data_set_default_double(settings, "iou_threshold", 0.3);
-	obs_data_set_default_double(settings, "instant_track_area_ratio", 0.0);
+	obs_data_set_default_double(settings, "face_match_threshold", 0.36);
+	obs_data_set_default_double(settings, "min_face_area_ratio", 2.0);
+	obs_data_set_default_int(settings, "face_inference_interval", 30);
+	obs_data_set_default_int(settings, "max_exempt_persons", 1);
+	obs_data_set_default_int(settings, "person_category", 0);
 	obs_data_set_default_int(settings, "max_unseen_frames", 10);
 	obs_data_set_default_bool(settings, "show_unseen_objects", true);
 	obs_data_set_default_int(settings, "numThreads", 1);
@@ -535,7 +525,6 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "object_category", -1);
 	obs_data_set_default_bool(settings, "enable_face_exclusion", false);
 	obs_data_set_default_string(settings, "reference_face_path", "");
-	obs_data_set_default_int(settings, "max_reference_images", 1);
 	obs_data_set_default_double(settings, "face_match_threshold", 0.36);
 	obs_data_set_default_int(settings, "person_category", -1);
 	obs_data_set_default_double(settings, "min_face_area_ratio", 30.0);
@@ -576,7 +565,6 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	std::string newRefPath = (ref_path && strlen(ref_path) > 0) ? ref_path : "";
 	bool refPathChanged = (tf->referenceFacePath != newRefPath);
 	tf->referenceFacePath = newRefPath;
-	tf->maxReferenceImages = (int)obs_data_get_int(settings, "max_reference_images");
 	tf->faceMatchThreshold = (float)obs_data_get_double(settings, "face_match_threshold");
 	tf->personCategory = (int)obs_data_get_int(settings, "person_category");
 	tf->minFaceAreaRatio = (float)obs_data_get_double(settings, "min_face_area_ratio");
@@ -604,6 +592,7 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	tf->crop_top = (int)obs_data_get_int(settings, "crop_top");
 	tf->crop_bottom = (int)obs_data_get_int(settings, "crop_bottom");
 	tf->minAreaThreshold = (int)obs_data_get_int(settings, "min_size_threshold");
+	tf->maxExemptPersons = (int)obs_data_get_int(settings, "max_exempt_persons");
 	tf->minHitFrames = (int)obs_data_get_int(settings, "min_hit_frames");
 	if (tf->tracker.getMinHitFrames() != tf->minHitFrames) {
 		tf->tracker.setMinHitFrames(tf->minHitFrames);
@@ -844,9 +833,7 @@ void detect_filter_update(void *data, obs_data_t *settings)
 				}
 				
 				int successCount = 0;
-				if (tf->maxReferenceImages <= 0) tf->maxReferenceImages = 1;
 				for (const auto& filePath : filesToProcess) {
-					if (successCount >= tf->maxReferenceImages) break;
 #ifdef _WIN32
 					FILE* f = _wfopen(filePath.wstring().c_str(), L"rb");
 #else
@@ -1054,10 +1041,17 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 		float screenArea = (float)(imageBGRA.cols * imageBGRA.rows);
 		float minPersonAreaPixels = screenArea * (tf->minFaceAreaRatio / 100.0f); // use as min person size to save perf
 
+		int current_is_me_count = 0;
+		for (Object &obj : objects) {
+			current_ids.insert(obj.id);
+			if (tf->faceStatusCache.count(obj.id) && tf->faceStatusCache[obj.id] == filter_data::FaceStatus::IS_ME) {
+				current_is_me_count++;
+			}
+		}
+
 		std::vector<Object> to_check;
 
 		for (Object &obj : objects) {
-			current_ids.insert(obj.id);
 			if (tf->personCategory != -1 && obj.label != tf->personCategory) continue;
 
 			// Check Cache
@@ -1067,6 +1061,10 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 			}
 			if (tf->faceStatusCache.count(obj.id) && tf->faceStatusCache[obj.id] == filter_data::FaceStatus::CHECKING) {
 				continue;
+			}
+
+			if (current_is_me_count >= tf->maxExemptPersons) {
+				continue; // Max exempt persons reached, skip inference
 			}
 
 			// Throttle Check
@@ -1109,34 +1107,19 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 	if (tf->enableFaceExclusion) {
 		std::vector<Object> filtered_objects;
 		
-		if (tf->sortTracking) {
-			for (Object &obj : objects) {
-				if (tf->faceExemptIds.count(obj.id)) {
-					obj.isExempt = true;
-				}
+		for (Object &obj : objects) {
+			if (tf->faceExemptIds.count(obj.id)) {
+				obj.isExempt = true;
 			}
 
-			for (Object &obj : objects) {
-				if (obj.hitFrames < tf->minHitFrames) {
-					obj.isUnconfirmed = true;
-				}
-				all_objects.push_back(obj);
-				if (!obj.isUnconfirmed && !obj.isExempt) {
-					filtered_objects.push_back(obj);
-				}
+			if (tf->sortTracking && obj.hitFrames < tf->minHitFrames) {
+				obj.isUnconfirmed = true;
 			}
-		} else {
-			// fallback for when sortTracking is disabled
-			for (Object &obj : objects) {
-				// Fallback doesn't use hitFrames accurately, so everything is confirmed
-				obj.isUnconfirmed = false;
-				all_objects.push_back(obj);
-				if (!obj.isExempt) {
-					filtered_objects.push_back(obj);
-				}
+			all_objects.push_back(obj);
+			if (!obj.isUnconfirmed && !obj.isExempt) {
+				filtered_objects.push_back(obj);
 			}
 		}
-		objects = filtered_objects;
 		objects = filtered_objects;
 	} else {
 		std::vector<Object> filtered_objects;
@@ -1193,11 +1176,7 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 
 	if (tf->preview || tf->maskingEnabled || tf->debugMode) {
 		cv::Mat frame;
-		if (tf->syncMode) {
-			cv::cvtColor(imageBGRA, frame, cv::COLOR_BGRA2BGR);
-		} else {
-			frame = cv::Mat::zeros(imageBGRA.size(), CV_8UC3);
-		}
+		cv::cvtColor(imageBGRA, frame, cv::COLOR_BGRA2BGR);
 
 		if (tf->preview && tf->crop_enabled) {
 			// draw the crop rectangle on the frame in a dashed line
@@ -1234,18 +1213,7 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 		}
 
 		std::lock_guard<std::mutex> lock(tf->outputLock);
-		if (tf->syncMode) {
-			cv::cvtColor(frame, tf->outputPreviewBGRA, cv::COLOR_BGR2BGRA);
-		} else {
-			cv::Mat alpha;
-			cv::cvtColor(frame, alpha, cv::COLOR_BGR2GRAY);
-			cv::threshold(alpha, alpha, 0, 255, cv::THRESH_BINARY);
-			cv::Mat bgra_channels[4];
-			cv::split(frame, bgra_channels);
-			bgra_channels[3] = alpha;
-			cv::merge(bgra_channels, 4, tf->outputOverlayBGRA);
-			tf->outputPreviewBGRA = imageBGRA.clone();
-		}
+		cv::cvtColor(frame, tf->outputPreviewBGRA, cv::COLOR_BGR2BGRA);
 	}
 
 	auto end_time = std::chrono::high_resolution_clock::now();
@@ -1635,7 +1603,7 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 		gs_texture_t *tex = nullptr;
 		bool destroy_tex = false;
 		
-		if (tf->syncMode && (tf->preview || tf->debugMode)) {
+		if (tf->preview || tf->debugMode) {
 			if (!tf->previewTexture || tf->lastTexWidth != width || tf->lastTexHeight != height) {
 				if (tf->previewTexture) gs_texture_destroy(tf->previewTexture);
 				tf->previewTexture = gs_texture_create(width, height, GS_BGRA, 1,
@@ -1648,16 +1616,6 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 		} else {
 			tex = gs_texrender_get_texture(tf->texrender);
 			destroy_tex = false;
-			
-			if (!tf->syncMode && (tf->preview || tf->debugMode)) {
-				if (!tf->overlayTexture || tf->lastTexWidth != width || tf->lastTexHeight != height) {
-					if (tf->overlayTexture) gs_texture_destroy(tf->overlayTexture);
-					tf->overlayTexture = gs_texture_create(width, height, GS_BGRA, 1,
-								      (const uint8_t **)&tf->outputOverlayBGRA.data, GS_DYNAMIC);
-				} else {
-					gs_texture_set_image(tf->overlayTexture, tf->outputOverlayBGRA.data, width * 4, false);
-				}
-			}
 		}
 
 		std::string technique_name = "Draw";
@@ -1698,18 +1656,6 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 
 		while (gs_effect_loop(tf->maskingEffect, technique_name.c_str())) {
 			gs_draw_sprite(tex, 0, 0, 0);
-		}
-
-		if (!tf->syncMode && (tf->preview || tf->debugMode) && tf->overlayTexture) {
-			gs_blend_state_push();
-			gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
-			
-			gs_effect_t *default_effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
-			while (gs_effect_loop(default_effect, "Draw")) {
-				gs_draw_sprite(tf->overlayTexture, 0, width, height);
-			}
-			
-			gs_blend_state_pop();
 		}
 
 		if (destroy_tex) {
