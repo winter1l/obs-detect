@@ -276,28 +276,14 @@ std::vector<Object> Sort::update(const std::vector<Object> &detections)
 		
 		if (best_det_idx != -1) {
 			int j = best_det_idx;
-			
-			// 순간이동 전 프레임 대비 이동 거리(관성) 계산
-			float dx = 0, dy = 0, dw = 0, dh = 0;
-			if (!trackedObjects[i].lastVisibleRects.empty()) {
-				const auto& last_rect = trackedObjects[i].lastVisibleRects.back();
-				float dt = (float)(trackedObjects[i].unseenFrames + 1);
-				dx = (detections[j].rect.x - last_rect.x) / dt;
-				dy = (detections[j].rect.y - last_rect.y) / dt;
-				dw = (detections[j].rect.width - last_rect.width) / dt;
-				dh = (detections[j].rect.height - last_rect.height) / dt;
-			}
-			
 			// 칼만 필터의 느린 추적을 우회하고 새 대상의 위치로 즉시 이동 (Instant Teleport)
 			trackedObjects[i].rect = detections[j].rect;
 			
-			// 칼만 필터의 내부 상태를 새 위치로 강제 초기화
-			initializeKalmanFilter(trackedObjects[i].kf, detections[j].rect);
-			// 방금 계산한 카메라 기동/대상 이동 관성(Velocity)을 강제로 주입하여 1프레임 딜레이 현상 방지
-			trackedObjects[i].kf.statePost.at<float>(4) = dx;
-			trackedObjects[i].kf.statePost.at<float>(5) = dy;
-			trackedObjects[i].kf.statePost.at<float>(6) = dw;
-			trackedObjects[i].kf.statePost.at<float>(7) = dh;
+			// 칼만 필터를 초기화하지 않고(기존 관성과 공분산 유지), 위치 좌표만 강제로 덮어씌움
+			trackedObjects[i].kf.statePost.at<float>(0) = detections[j].rect.x;
+			trackedObjects[i].kf.statePost.at<float>(1) = detections[j].rect.y;
+			trackedObjects[i].kf.statePost.at<float>(2) = detections[j].rect.width;
+			trackedObjects[i].kf.statePost.at<float>(3) = detections[j].rect.height;
 			trackedObjects[i].kf.statePost.copyTo(trackedObjects[i].kf.statePre);
 			
 			trackedObjects[i].unseenFrames = 0;
