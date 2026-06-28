@@ -1591,8 +1591,15 @@ static void face_inference_thread_loop(struct detect_filter *tf)
 				std::vector<Object> faces;
 				if (is_already_face) {
 					// We already have the landmarks from the main thread YuNet!
-					// They are relative to the full frame, which matches croppedBGR exactly.
-					faces.push_back(obj);
+					// They are relative to the full frame. We need to shift them to match croppedBGR.
+					Object shifted_face = obj;
+					for (int l = 0; l < 5; ++l) {
+						shifted_face.landmarks[l].x -= crop_rect.x;
+						shifted_face.landmarks[l].y -= crop_rect.y;
+					}
+					shifted_face.rect.x -= crop_rect.x;
+					shifted_face.rect.y -= crop_rect.y;
+					faces.push_back(shifted_face);
 				} else {
 					faces = local_yunet->inference(croppedBGR);
 				}
