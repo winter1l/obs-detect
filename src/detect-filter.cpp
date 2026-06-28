@@ -39,14 +39,12 @@
 #include "detect-filter-utils.h"
 #include "edgeyolo/edgeyolo_onnxruntime.hpp"
 #include "ort-model/YOLOv8FaceONNX.hpp"
-#include "ort-model/SCRFDONNX.hpp"
 #include "yunet/YuNet.h"
 
 #define EXTERNAL_MODEL_SIZE "!!!EXTERNAL_MODEL!!!"
 #define FACE_YUNET_MODEL_SIZE "!!!FACE_YUNET!!!"
 #define FACE_YOLO_N_MODEL_SIZE "!!!FACE_YOLO_N!!!"
 #define FACE_YOLO_S_MODEL_SIZE "!!!FACE_YOLO_S!!!"
-#define FACE_SCRFD_MODEL_SIZE "!!!FACE_SCRFD!!!"
 
 struct detect_filter : public filter_data {};
 
@@ -366,11 +364,12 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_add_int(sort_group_props, "max_unseen_frames", obs_module_text("MaxUnseenFrames"), 1, 30, 1);
 	obs_properties_add_bool(sort_group_props, "show_unseen_objects", obs_module_text("ShowUnseenObjects"));
 	obs_properties_add_float_slider(sort_group_props, "ghost_recovery_multiplier", obs_module_text("GhostRecoveryMultiplier"), 0.5, 5.0, 0.1);
+	obs_properties_add_int(sort_group_props, "ghost_recovery_max_unseen", obs_module_text("GhostRecoveryMaxUnseen"), 1, 15, 1);
 
 	// Hide subproperties completely when unchecked
 	obs_property_set_modified_callback(sort_tracking, [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
 		const bool enabled = obs_data_get_bool(settings, "sort_tracking");
-		for (auto prop_name : {"min_hit_frames", "iou_threshold", "instant_track_area_ratio", "max_unseen_frames", "show_unseen_objects", "ghost_recovery_multiplier"}) {
+		for (auto prop_name : {"min_hit_frames", "iou_threshold", "instant_track_area_ratio", "max_unseen_frames", "show_unseen_objects", "ghost_recovery_multiplier", "ghost_recovery_max_unseen"}) {
 			obs_property_t *prop = obs_properties_get(props_, prop_name);
 			if (prop) obs_property_set_visible(prop, enabled);
 		}
@@ -411,8 +410,6 @@ obs_properties_t *detect_filter_properties(void *data)
 				     FACE_YOLO_N_MODEL_SIZE);
 	obs_property_list_add_string(model_size, obs_module_text("FaceTrackingModel.YOLOv8s"),
 				     FACE_YOLO_S_MODEL_SIZE);
-	obs_property_list_add_string(model_size, obs_module_text("FaceTrackingModel.SCRFD"),
-				     FACE_SCRFD_MODEL_SIZE);
 	obs_property_list_add_string(model_size, obs_module_text("ExternalModel"),
 				     EXTERNAL_MODEL_SIZE);
 
@@ -431,8 +428,7 @@ obs_properties_t *detect_filter_properties(void *data)
 			bool is_external = model_size_value == EXTERNAL_MODEL_SIZE;
 			bool is_face_detect = (model_size_value == FACE_YUNET_MODEL_SIZE ||
 					       model_size_value == FACE_YOLO_N_MODEL_SIZE ||
-					       model_size_value == FACE_YOLO_S_MODEL_SIZE ||
-					       model_size_value == FACE_SCRFD_MODEL_SIZE);
+					       model_size_value == FACE_YOLO_S_MODEL_SIZE);
 			
 			obs_property_t *prop = obs_properties_get(props_, "external_model_file");
 			obs_property_set_visible(prop, is_external);
@@ -578,6 +574,7 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "crop_top", 0);
 	obs_data_set_default_int(settings, "crop_bottom", 0);
 	obs_data_set_default_double(settings, "ghost_recovery_multiplier", 2.0);
+	obs_data_set_default_int(settings, "ghost_recovery_max_unseen", 3);
 }
 
 void detect_filter_update(void *data, obs_data_t *settings)
@@ -649,6 +646,10 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	if (tf->tracker.getGhostRecoveryMultiplier() != ghost_recovery_multiplier) {
 		tf->tracker.setGhostRecoveryMultiplier(ghost_recovery_multiplier);
 	}
+	int ghost_recovery_max_unseen = (int)obs_data_get_int(settings, "ghost_recovery_max_unseen");
+	if (tf->tracker.getGhostRecoveryMaxUnseen() != ghost_recovery_max_unseen) {
+		tf->tracker.setGhostRecoveryMaxUnseen(ghost_recovery_max_unseen);
+	}
 
 	// check if tracking state has changed
 	if (tf->trackingEnabled != newTrackingEnabled) {
@@ -714,8 +715,6 @@ void detect_filter_update(void *data, obs_data_t *settings)
 			modelFilepath_rawPtr = obs_module_file("models/yolov8n-face.onnx");
 		} else if (newModelSize == FACE_YOLO_S_MODEL_SIZE) {
 			modelFilepath_rawPtr = obs_module_file("models/yolov8s-face.onnx");
-		} else if (newModelSize == FACE_SCRFD_MODEL_SIZE) {
-			modelFilepath_rawPtr = obs_module_file("models/scrfd_500m_kps.onnx");
 		} else if (newModelSize == EXTERNAL_MODEL_SIZE) {
 			const char *external_model_file =
 				obs_data_get_string(settings, "external_model_file");
@@ -795,8 +794,7 @@ void detect_filter_update(void *data, obs_data_t *settings)
 			}
 		} else if (tf->modelSize == FACE_YUNET_MODEL_SIZE ||
 			   tf->modelSize == FACE_YOLO_N_MODEL_SIZE ||
-			   tf->modelSize == FACE_YOLO_S_MODEL_SIZE ||
-			   tf->modelSize == FACE_SCRFD_MODEL_SIZE) {
+			   tf->modelSize == FACE_YOLO_S_MODEL_SIZE) {
 			num_classes_ = 1;
 			tf->classNames = yunet::FACE_CLASSES;
 		}
@@ -814,11 +812,6 @@ void detect_filter_update(void *data, obs_data_t *settings)
 			} else if (tf->modelSize == FACE_YOLO_N_MODEL_SIZE ||
 				   tf->modelSize == FACE_YOLO_S_MODEL_SIZE) {
 				tf->onnxruntimemodel = std::make_unique<YOLOv8FaceONNX>(
-					tf->modelFilepath, tf->numThreads, tf->numThreads,
-					tf->useGPU, onnxruntime_device_id_,
-					onnxruntime_use_parallel_, nms_th_, tf->conf_threshold);
-			} else if (tf->modelSize == FACE_SCRFD_MODEL_SIZE) {
-				tf->onnxruntimemodel = std::make_unique<SCRFDONNX>(
 					tf->modelFilepath, tf->numThreads, tf->numThreads,
 					tf->useGPU, onnxruntime_device_id_,
 					onnxruntime_use_parallel_, nms_th_, tf->conf_threshold);

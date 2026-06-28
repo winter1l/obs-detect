@@ -75,6 +75,15 @@ public:
 	// Get Ghost Recovery Multiplier
 	float getGhostRecoveryMultiplier() const { return this->ghostRecoveryMultiplier; }
 
+	// Set Ghost Recovery Max Unseen Frames
+	void setGhostRecoveryMaxUnseen(size_t maxUnseen)
+	{
+		this->ghostRecoveryMaxUnseen = maxUnseen;
+	}
+
+	// Get Ghost Recovery Max Unseen Frames
+	size_t getGhostRecoveryMaxUnseen() const { return this->ghostRecoveryMaxUnseen; }
+
 private:
 	// Private methods for the Kalman filter and other internal workings
 	void initializeKalmanFilter(cv::KalmanFilter &kf, const cv::Rect_<float> &bbox);
@@ -90,6 +99,7 @@ private:
 	float instantTrackAreaRatio = 0.0f;
 	float screenArea = 0.0f;
 	float ghostRecoveryMultiplier = 2.0f;
+	size_t ghostRecoveryMaxUnseen = 3;
 };
 
 #endif

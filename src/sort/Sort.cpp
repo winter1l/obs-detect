@@ -134,9 +134,11 @@ std::vector<Object> Sort::update(const std::vector<Object> &detections)
 
 			bool can_predict = trackedObjects[i].lastVisibleRects.size() > 1;
 			// Remove lost tracks
-			if (trackedObjects[i].unseenFrames < this->maxUnseenFrames &&
-			    trackedObjects[i].hitFrames >= this->minHitFrames &&
-			    can_predict) {
+			bool is_stable_and_recent = trackedObjects[i].unseenFrames < this->maxUnseenFrames &&
+			                            trackedObjects[i].hitFrames >= this->minHitFrames;
+			bool is_new_and_recent = trackedObjects[i].unseenFrames < this->ghostRecoveryMaxUnseen &&
+			                         trackedObjects[i].hitFrames < this->minHitFrames;
+			if ((is_stable_and_recent || is_new_and_recent) && can_predict) {
 				newTrackedObjects.push_back(trackedObjects[i]);
 			}
 		}
@@ -328,10 +330,13 @@ std::vector<Object> Sort::update(const std::vector<Object> &detections)
 	std::vector<int> newTrackIDs;
 	for (size_t i = 0; i < trackedObjects.size(); ++i) {
 		bool can_predict = trackedObjects[i].lastVisibleRects.size() > 1;
+		bool is_stable_and_recent = trackedObjects[i].unseenFrames < this->maxUnseenFrames &&
+		                            trackedObjects[i].hitFrames >= this->minHitFrames;
+		bool is_new_and_recent = trackedObjects[i].unseenFrames < this->ghostRecoveryMaxUnseen &&
+		                         trackedObjects[i].hitFrames < this->minHitFrames;
+		
 		if (trackedObjectUsed[i] ||
-		    (trackedObjects[i].unseenFrames < this->maxUnseenFrames &&
-		     trackedObjects[i].hitFrames >= this->minHitFrames &&
-		     can_predict)) {
+		    ((is_stable_and_recent || is_new_and_recent) && can_predict)) {
 			newTrackedObjects.push_back(trackedObjects[i]);
 			if (!trackedObjectUsed[i]) {
 				newTrackedObjects.back().unseenFrames++;

@@ -7,11 +7,9 @@ file(MAKE_DIRECTORY ${MODELS_DIR})
 # URL Configuration
 set(YOLOV8N_FACE_URL "https://github.com/lindevs/yolov8-face/releases/latest/download/yolov8n-face-lindevs.onnx")
 set(YOLOV8S_FACE_URL "https://github.com/lindevs/yolov8-face/releases/latest/download/yolov8s-face-lindevs.onnx")
-set(SCRFD_500M_URL "https://github.com/deepinsight/insightface/raw/master/detection/scrfd/onnx/scrfd_500m_kps.onnx") # Note: This might not be a direct link, but acts as a fallback.
 
 set(YOLOV8N_FACE_FILE "${MODELS_DIR}/yolov8n-face.onnx")
 set(YOLOV8S_FACE_FILE "${MODELS_DIR}/yolov8s-face.onnx")
-set(SCRFD_500M_FILE "${MODELS_DIR}/scrfd_500m_kps.onnx")
 
 # Helper to find Python
 find_program(PYTHON_EXECUTABLE NAMES python3 python)
@@ -69,16 +67,3 @@ else()
     message(STATUS "YOLOv8s-Face ONNX model already exists.")
 endif()
 
-# Download SCRFD 500M
-if(NOT EXISTS ${SCRFD_500M_FILE})
-    message(STATUS "Downloading SCRFD 500M ONNX model...")
-    file(DOWNLOAD ${SCRFD_500M_URL} ${SCRFD_500M_FILE}
-         SHOW_PROGRESS
-         STATUS DOWNLOAD_STATUS)
-    list(GET DOWNLOAD_STATUS 0 STATUS_CODE)
-    if(NOT STATUS_CODE EQUAL 0)
-        message(WARNING "Failed to download SCRFD 500M. Please download it manually to ${SCRFD_500M_FILE}")
-    endif()
-else()
-    message(STATUS "SCRFD 500M ONNX model already exists.")
-endif()
