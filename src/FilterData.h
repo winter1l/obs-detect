@@ -8,6 +8,14 @@
 #include "sface/SFace.h"
 #include <unordered_map>
 #include <unordered_set>
+#include <chrono>
+#include <vector>
+#include <mutex>
+
+struct DebugFaceBox {
+	cv::Rect2f rect;
+	std::chrono::steady_clock::time_point timestamp;
+};
 
 /**
   * @brief The filter_data struct
@@ -99,6 +107,9 @@ struct filter_data {
 	bool debugMode;
 	float currentInferenceTimeMs;
 	float currentInferenceFPS;
+	bool showYuNetDetections;
+	std::vector<DebugFaceBox> debugFaceBoxes;
+	std::mutex debugFaceMutex;
 
 	bool isDisabled;
 	bool preview;

@@ -466,6 +466,8 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_add_bool(debug_group_props, "debug_mode", obs_module_text("DebugMode"));
 	obs_properties_add_bool(debug_group_props, "enable_face_stats", obs_module_text("ShowFaceSimilarityStats"));
 	
+	obs_properties_add_bool(debug_group_props, "show_yunet_detections", obs_module_text("ShowYuNetDetections"));
+	
 	obs_property_t *enable_face_stats_log = obs_properties_add_bool(debug_group_props, "enable_face_stats_log", obs_module_text("SaveFaceStatsToCSV"));
 	obs_properties_add_path(debug_group_props, "face_stats_log_path", obs_module_text("SaveFaceStatsCSVPath"), OBS_PATH_FILE_SAVE, "CSV file (*.csv);;All files (*.*)", nullptr);
 	obs_properties_add_path(debug_group_props, "save_detections_path", obs_module_text("SaveDetectionsPath"), OBS_PATH_FILE_SAVE, "JSON file (*.json);;All files (*.*)", nullptr);
@@ -507,6 +509,7 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "max_exempt_persons", 1);
 	obs_data_set_default_bool(settings, "enable_face_stats", false);
 	obs_data_set_default_bool(settings, "enable_face_stats_log", false);
+	obs_data_set_default_bool(settings, "show_yunet_detections", false);
 	obs_data_set_default_string(settings, "face_stats_log_path", "");
 	obs_data_set_default_int(settings, "person_category", 0);
 	obs_data_set_default_int(settings, "max_unseen_frames", 10);
@@ -590,6 +593,7 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	tf->enableFaceStats = obs_data_get_bool(settings, "enable_face_stats");
 	tf->enableFaceStatsLog = obs_data_get_bool(settings, "enable_face_stats_log");
 	tf->faceStatsLogPath = obs_data_get_string(settings, "face_stats_log_path");
+	tf->showYuNetDetections = obs_data_get_bool(settings, "show_yunet_detections");
 
 	if (tf->tracker.getMinHitFrames() != tf->minHitFrames) {
 		tf->tracker.setMinHitFrames(tf->minHitFrames);
@@ -884,6 +888,10 @@ void detect_filter_update(void *data, obs_data_t *settings)
 		tf->faceStatusCache.clear();
 		tf->faceSimilarityCache.clear();
 		tf->faceExemptIds.clear();
+		{
+			std::lock_guard<std::mutex> d_lock(tf->debugFaceMutex);
+			tf->debugFaceBoxes.clear();
+		}
 	}
 
 	// update threshold on edgeyolo
@@ -1253,6 +1261,28 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 			cv::putText(overlay, debugText, cv::Point(20, 50), cv::FONT_HERSHEY_SIMPLEX, 1.5, cv::Scalar(0, 0, 255, 255), 3, cv::LINE_AA);
 		}
 
+		if (tf->showYuNetDetections) {
+			auto now = std::chrono::steady_clock::now();
+			std::lock_guard<std::mutex> d_lock(tf->debugFaceMutex);
+			auto it = tf->debugFaceBoxes.begin();
+			while (it != tf->debugFaceBoxes.end()) {
+				double elapsed = std::chrono::duration<double>(now - it->timestamp).count();
+				if (elapsed > 1.0) {
+					it = tf->debugFaceBoxes.erase(it);
+				} else {
+					int alpha = (int)((1.0 - elapsed) * 200.0);
+					if (alpha < 0) alpha = 0;
+					cv::rectangle(overlay, it->rect, cv::Scalar(255, 0, 0, alpha), 1, cv::LINE_AA);
+					
+					char lbl[64];
+					snprintf(lbl, sizeof(lbl), "YuNet (%.1fs)", 1.0 - elapsed);
+					cv::putText(overlay, lbl, cv::Point((int)it->rect.x, (int)it->rect.y - 5), 
+					            cv::FONT_HERSHEY_SIMPLEX, 0.35, cv::Scalar(255, 255, 0, alpha), 1, cv::LINE_AA);
+					++it;
+				}
+			}
+		}
+
 		if (tf->enableFaceStats) {
 			int tChecks, tIsMe, tNotMe;
 			float tSumSim;
@@ -1480,8 +1510,19 @@ static void face_inference_thread_loop(struct detect_filter *tf)
 		for (const Object& obj : to_check) {
 			if (tf->stopFaceInferenceThread) break;
 
-			cv::Rect_<float> upper_body_rect(obj.rect.x, obj.rect.y, obj.rect.width, obj.rect.height * 0.4f);
-			cv::Rect crop_rect = upper_body_rect & cv::Rect_<float>(0, 0, (float)imageBGRA.cols, (float)imageBGRA.rows);
+			cv::Rect_<float> crop_box;
+			if (obj.label < tf->classNames.size() && 
+			    (tf->classNames[obj.label] == "face" || tf->classNames[obj.label] == "head")) {
+				// It's already a face/head box. Use it fully, expand by 20% on all sides
+				float exp_w = obj.rect.width * 0.2f;
+				float exp_h = obj.rect.height * 0.2f;
+				crop_box = cv::Rect_<float>(obj.rect.x - exp_w, obj.rect.y - exp_h, 
+				                            obj.rect.width + exp_w * 2.0f, obj.rect.height + exp_h * 2.0f);
+			} else {
+				// Use the full person box (100% crop) to avoid cutting the face
+				crop_box = obj.rect;
+			}
+			cv::Rect crop_rect = crop_box & cv::Rect_<float>(0, 0, (float)imageBGRA.cols, (float)imageBGRA.rows);
 			
 			if (crop_rect.width > 0 && crop_rect.height > 0) {
 				cv::Mat cropped = imageBGRA(crop_rect);
@@ -1491,6 +1532,43 @@ static void face_inference_thread_loop(struct detect_filter *tf)
 				std::vector<Object> faces = local_yunet->inference(croppedBGR);
 				bool is_me = false;
 				if (!faces.empty()) {
+					// Store all detected faces in absolute coordinates for debug overlay
+					std::vector<DebugFaceBox> new_debug_boxes;
+					for (const auto& face : faces) {
+						DebugFaceBox dbg;
+						dbg.rect = face.rect;
+						dbg.rect.x += crop_rect.x;
+						dbg.rect.y += crop_rect.y;
+						dbg.timestamp = std::chrono::steady_clock::now();
+						new_debug_boxes.push_back(dbg);
+					}
+					{
+						std::lock_guard<std::mutex> d_lock(tf->debugFaceMutex);
+						tf->debugFaceBoxes.insert(tf->debugFaceBoxes.end(), new_debug_boxes.begin(), new_debug_boxes.end());
+					}
+
+					// Sort faces to select the one closest to the top-center of the person box
+					if (faces.size() > 1) {
+						float p_cx = (float)crop_rect.width / 2.0f;
+						float p_ty = (float)crop_rect.height * 0.15f; // Target face center (15% from the top)
+						std::sort(faces.begin(), faces.end(), [p_cx, p_ty](const Object& a, const Object& b) {
+							float a_cx = a.rect.x + a.rect.width / 2.0f;
+							float a_cy = a.rect.y + a.rect.height / 2.0f;
+							float b_cx = b.rect.x + b.rect.width / 2.0f;
+							float b_cy = b.rect.y + b.rect.height / 2.0f;
+							
+							float a_dx = a_cx - p_cx;
+							float a_dy = a_cy - p_ty;
+							float a_score = (a_dx * a_dx * 2.0f) + (a_dy * a_dy); // Weight centerline closeness higher
+							
+							float b_dx = b_cx - p_cx;
+							float b_dy = b_cy - p_ty;
+							float b_score = (b_dx * b_dx * 2.0f) + (b_dy * b_dy);
+							
+							return a_score < b_score;
+						});
+					}
+
 					std::vector<float> feat = local_sface->inference(croppedBGR, faces[0].landmarks);
 					float max_sim = -1.0f;
 					for (const auto& refFeat : tf->referenceFaceFeatures) {
