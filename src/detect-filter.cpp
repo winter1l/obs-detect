@@ -991,6 +991,10 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 		for (Object &obj : objects) {
 			obj.rect.x += (float)cropRect.x;
 			obj.rect.y += (float)cropRect.y;
+			for (int n = 0; n < 5; n++) {
+				obj.landmarks[n].x += (float)cropRect.x;
+				obj.landmarks[n].y += (float)cropRect.y;
+			}
 		}
 	}
 
@@ -1510,14 +1514,12 @@ static void face_inference_thread_loop(struct detect_filter *tf)
 		for (const Object& obj : to_check) {
 			if (tf->stopFaceInferenceThread) break;
 
+			bool is_already_face = (obj.label < tf->classNames.size() && 
+			                        (tf->classNames[obj.label] == "face" || tf->classNames[obj.label] == "head"));
 			cv::Rect_<float> crop_box;
-			if (obj.label < tf->classNames.size() && 
-			    (tf->classNames[obj.label] == "face" || tf->classNames[obj.label] == "head")) {
-				// It's already a face/head box. Use it fully, expand by 20% on all sides
-				float exp_w = obj.rect.width * 0.2f;
-				float exp_h = obj.rect.height * 0.2f;
-				crop_box = cv::Rect_<float>(obj.rect.x - exp_w, obj.rect.y - exp_h, 
-				                            obj.rect.width + exp_w * 2.0f, obj.rect.height + exp_h * 2.0f);
+			if (is_already_face) {
+				// SFace can align the face directly from the full BGR frame using absolute landmarks
+				crop_box = cv::Rect_<float>(0, 0, (float)imageBGRA.cols, (float)imageBGRA.rows);
 			} else {
 				// Use the full person box (100% crop) to avoid cutting the face
 				crop_box = obj.rect;
@@ -1529,46 +1531,56 @@ static void face_inference_thread_loop(struct detect_filter *tf)
 				cv::Mat croppedBGR;
 				cv::cvtColor(cropped, croppedBGR, cv::COLOR_BGRA2BGR);
 				
-				std::vector<Object> faces = local_yunet->inference(croppedBGR);
+				std::vector<Object> faces;
+				if (is_already_face) {
+					// We already have the landmarks from the main thread YuNet!
+					// They are relative to the full frame, which matches croppedBGR exactly.
+					faces.push_back(obj);
+				} else {
+					faces = local_yunet->inference(croppedBGR);
+				}
+				
 				bool is_me = false;
 				if (!faces.empty()) {
-					// Store all detected faces in absolute coordinates for debug overlay
-					std::vector<DebugFaceBox> new_debug_boxes;
-					for (const auto& face : faces) {
-						DebugFaceBox dbg;
-						dbg.rect = face.rect;
-						dbg.rect.x += crop_rect.x;
-						dbg.rect.y += crop_rect.y;
-						dbg.timestamp = std::chrono::steady_clock::now();
-						new_debug_boxes.push_back(dbg);
-					}
-					{
-						std::lock_guard<std::mutex> d_lock(tf->debugFaceMutex);
-						tf->debugFaceBoxes.insert(tf->debugFaceBoxes.end(), new_debug_boxes.begin(), new_debug_boxes.end());
-					}
+					// Only store debug boxes and sort if we actually ran YuNet in the background (i.e. not is_already_face)
+					if (!is_already_face) {
+						// Store all detected faces in absolute coordinates for debug overlay
+						std::vector<DebugFaceBox> new_debug_boxes;
+						for (const auto& face : faces) {
+							DebugFaceBox dbg;
+							dbg.rect = face.rect;
+							dbg.rect.x += crop_rect.x;
+							dbg.rect.y += crop_rect.y;
+							dbg.timestamp = std::chrono::steady_clock::now();
+							new_debug_boxes.push_back(dbg);
+						}
+						{
+							std::lock_guard<std::mutex> d_lock(tf->debugFaceMutex);
+							tf->debugFaceBoxes.insert(tf->debugFaceBoxes.end(), new_debug_boxes.begin(), new_debug_boxes.end());
+						}
 
-					// Sort faces to select the one closest to the top-center of the person box
-					if (faces.size() > 1) {
-						float p_cx = (float)crop_rect.width / 2.0f;
-						float p_ty = (float)crop_rect.height * 0.15f; // Target face center (15% from the top)
-						std::sort(faces.begin(), faces.end(), [p_cx, p_ty](const Object& a, const Object& b) {
-							float a_cx = a.rect.x + a.rect.width / 2.0f;
-							float a_cy = a.rect.y + a.rect.height / 2.0f;
-							float b_cx = b.rect.x + b.rect.width / 2.0f;
-							float b_cy = b.rect.y + b.rect.height / 2.0f;
-							
-							float a_dx = a_cx - p_cx;
-							float a_dy = a_cy - p_ty;
-							float a_score = (a_dx * a_dx * 2.0f) + (a_dy * a_dy); // Weight centerline closeness higher
-							
-							float b_dx = b_cx - p_cx;
-							float b_dy = b_cy - p_ty;
-							float b_score = (b_dx * b_dx * 2.0f) + (b_dy * b_dy);
-							
-							return a_score < b_score;
-						});
+						// Sort faces to select the one closest to the top-center of the person box
+						if (faces.size() > 1) {
+							float p_cx = (float)crop_rect.width / 2.0f;
+							float p_ty = (float)crop_rect.height * 0.15f; // Target face center (15% from the top)
+							std::sort(faces.begin(), faces.end(), [p_cx, p_ty](const Object& a, const Object& b) {
+								float a_cx = a.rect.x + a.rect.width / 2.0f;
+								float a_cy = a.rect.y + a.rect.height / 2.0f;
+								float b_cx = b.rect.x + b.rect.width / 2.0f;
+								float b_cy = b.rect.y + b.rect.height / 2.0f;
+								
+								float a_dx = a_cx - p_cx;
+								float a_dy = a_cy - p_ty;
+								float a_score = (a_dx * a_dx * 2.0f) + (a_dy * a_dy); // Weight centerline closeness higher
+								
+								float b_dx = b_cx - p_cx;
+								float b_dy = b_cy - p_ty;
+								float b_score = (b_dx * b_dx * 2.0f) + (b_dy * b_dy);
+								
+								return a_score < b_score;
+							});
+						}
 					}
-
 					std::vector<float> feat = local_sface->inference(croppedBGR, faces[0].landmarks);
 					float max_sim = -1.0f;
 					for (const auto& refFeat : tf->referenceFaceFeatures) {
