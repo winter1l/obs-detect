@@ -240,6 +240,9 @@ std::vector<Object> Sort::update(const std::vector<Object> &detections)
 				}
 				trackedObjects[i].label = detections[j].label;
 				trackedObjects[i].prob = detections[j].prob;
+				for (int n = 0; n < 5; ++n) {
+					trackedObjects[i].landmarks[n] = detections[j].landmarks[n];
+				}
 				// mark the detection and the tracked object as used
 				detectionUsed[j] = true;
 				trackedObjectUsed[i] = true;
@@ -296,6 +299,9 @@ std::vector<Object> Sort::update(const std::vector<Object> &detections)
 			}
 			trackedObjects[i].label = detections[j].label;
 			trackedObjects[i].prob = detections[j].prob;
+			for (int n = 0; n < 5; ++n) {
+				trackedObjects[i].landmarks[n] = detections[j].landmarks[n];
+			}
 			
 			detectionUsed[j] = true;
 			trackedObjectUsed[i] = true;
