@@ -54,9 +54,17 @@ void Sort::initializeKalmanFilter(cv::KalmanFilter &kf, const cv::Rect_<float> &
 			      0, 0, 1, 0, 0, 0, 0, 0.5, 0, 0, 0, 1) *
 			     q;
 
-	// Measurement noise covariance matrix
+	// Measurement noise covariance matrix (Dynamically adjust based on size)
+	float noiseMultiplier = 1.0f;
+	if (this->screenArea > 0.0f) {
+		float area_ratio = bbox.area() / this->screenArea;
+		// Small targets (e.g. face 1%) get lower noise (trust measurement more)
+		// Large targets (e.g. body 10%+) get standard noise (more smoothing)
+		noiseMultiplier = std::clamp(area_ratio * 10.0f, 0.05f, 1.0f);
+	}
+	
 	kf.measurementNoiseCov =
-		(cv::Mat_<float>(4, 4) << 4, 0, 0, 0, 0, 4, 0, 0, 0, 0, 10, 0, 0, 0, 0, 10);
+		(cv::Mat_<float>(4, 4) << 4, 0, 0, 0, 0, 4, 0, 0, 0, 0, 10, 0, 0, 0, 0, 10) * noiseMultiplier;
 
 	// Error covariance matrix
 	cv::setIdentity(kf.errorCovPost, cv::Scalar::all(1e3));
@@ -81,6 +89,14 @@ cv::Rect_<float> Sort::predict(cv::KalmanFilter &kf)
 // Update the Kalman filter with a new measurement
 cv::Rect_<float> Sort::updateKalmanFilter(cv::KalmanFilter &kf, const cv::Rect_<float> &bbox)
 {
+	float noiseMultiplier = 1.0f;
+	if (this->screenArea > 0.0f) {
+		float area_ratio = bbox.area() / this->screenArea;
+		noiseMultiplier = std::clamp(area_ratio * 10.0f, 0.05f, 1.0f);
+	}
+	kf.measurementNoiseCov =
+		(cv::Mat_<float>(4, 4) << 4, 0, 0, 0, 0, 4, 0, 0, 0, 0, 10, 0, 0, 0, 0, 10) * noiseMultiplier;
+
 	cv::Mat measurement(4, 1, CV_32F);
 	measurement.at<float>(0) = bbox.x;
 	measurement.at<float>(1) = bbox.y;
