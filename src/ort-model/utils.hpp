@@ -60,59 +60,92 @@ static void draw_objects(cv::Mat bgr, const std::vector<Object> &objects,
 		const Object &obj = objects[i];
 
 		int color_index = obj.label % 80;
-		cv::Scalar color = cv::Scalar(color_list[color_index][0],
-					      color_list[color_index][1],
-					      color_list[color_index][2]);
-		float c_mean = (float)(cv::mean(color)[0]);
+		cv::Scalar color = cv::Scalar(color_list[color_index][0] * 255.0,
+					      color_list[color_index][1] * 255.0,
+					      color_list[color_index][2] * 255.0, 255.0);
+		// Reproduce original bug/logic where alpha 0 was included in the mean
+		float c_mean = (color_list[color_index][0] + color_list[color_index][1] + color_list[color_index][2]) / 4.0f;
 		cv::Scalar txt_color;
 		if (c_mean > 0.5) {
-			txt_color = cv::Scalar(0, 0, 0);
+			txt_color = cv::Scalar(0, 0, 0, 255);
 		} else {
-			txt_color = cv::Scalar(255, 255, 255);
+			txt_color = cv::Scalar(255, 255, 255, 255);
 		}
 
 		if (obj.isUnconfirmed) {
-			color = cv::Scalar(0.5, 0.5, 0.5); // Gray
-			txt_color = cv::Scalar(255, 255, 255);
+			color = cv::Scalar(128, 128, 128, 255); // Gray
+			txt_color = cv::Scalar(255, 255, 255, 255);
 		} else if (obj.isExempt) {
-			color = cv::Scalar(0, 0, 1.0); // Red
-			txt_color = cv::Scalar(255, 255, 255);
+			color = cv::Scalar(0, 0, 255, 255); // Red
+			txt_color = cv::Scalar(255, 255, 255, 255);
 		}
 
-		cv::rectangle(bgr, obj.rect, color * 255, 2);
+		cv::rectangle(bgr, obj.rect, color, 2);
 
-		char text[256];
-		if (obj.isUnconfirmed) {
-			snprintf(text, sizeof(text), "Unconfirmed / 미확정");
+		char base_text[128];
+		snprintf(base_text, sizeof(base_text), "%s %.1f%%", class_names[obj.label].c_str(), obj.prob * 100);
+
+		std::string status_text = "";
+		cv::Scalar status_bg_color = color * 0.7;
+		status_bg_color[3] = 255;
+		cv::Scalar status_txt_color = txt_color;
+
+		if (!obj.customText.empty()) {
+			status_text = obj.customText;
+			if (status_text.find("Exempted") != std::string::npos) {
+				status_bg_color = cv::Scalar(0, 180, 0, 255); // Green
+				status_txt_color = cv::Scalar(255, 255, 255, 255);
+			} else if (status_text.find("Not Me") != std::string::npos) {
+				status_bg_color = cv::Scalar(0, 0, 200, 255); // Red
+				status_txt_color = cv::Scalar(255, 255, 255, 255);
+			} else if (status_text.find("Checking") != std::string::npos) {
+				status_bg_color = cv::Scalar(0, 165, 255, 255); // Orange
+				status_txt_color = cv::Scalar(255, 255, 255, 255);
+			} else if (status_text.find("Too Small") != std::string::npos) {
+				status_bg_color = cv::Scalar(128, 128, 128, 255); // Gray
+				status_txt_color = cv::Scalar(255, 255, 255, 255);
+			}
+		} else if (obj.isUnconfirmed) {
+			status_text = "Unconfirmed / 미확정";
+			status_bg_color = cv::Scalar(128, 128, 128, 255);
+			status_txt_color = cv::Scalar(255, 255, 255, 255);
 		} else if (obj.isExempt) {
-			snprintf(text, sizeof(text), "Exempted / 제외됨");
-		} else {
-			snprintf(text, sizeof(text), "%s %.1f%%", class_names[obj.label].c_str(),
-				 obj.prob * 100);
+			status_text = "Exempted / 제외됨";
+			status_bg_color = cv::Scalar(0, 180, 0, 255);
+			status_txt_color = cv::Scalar(255, 255, 255, 255);
 		}
 
 		int baseLine = 0;
-		cv::Size label_size =
-			cv::getTextSize(text, cv::FONT_HERSHEY_SIMPLEX, 0.4, 1, &baseLine);
-
-		cv::Scalar txt_bk_color = color * 0.7 * 255;
+		cv::Size base_size = cv::getTextSize(base_text, cv::FONT_HERSHEY_SIMPLEX, 0.4, 1, &baseLine);
 
 		int x = (int)(obj.rect.x);
 		int y = (int)(obj.rect.y + 1);
-		if (y > bgr.rows)
-			y = bgr.rows;
+		if (y > bgr.rows) y = bgr.rows;
 
-		cv::rectangle(bgr,
-			      cv::Rect(cv::Point(x, y),
-				       cv::Size(label_size.width, label_size.height + baseLine)),
-			      txt_bk_color, -1);
+		// Draw base_text
+		cv::Scalar base_bg_color = color * 0.7;
+		base_bg_color[3] = 255;
+		cv::rectangle(bgr, cv::Rect(cv::Point(x, y), cv::Size(base_size.width, base_size.height + baseLine)), base_bg_color, -1);
+		cv::putText(bgr, base_text, cv::Point(x, y + base_size.height), cv::FONT_HERSHEY_SIMPLEX, 0.4, txt_color, 1);
 
-		cv::putText(bgr, text, cv::Point(x, y + label_size.height),
-			    cv::FONT_HERSHEY_SIMPLEX, 0.4, txt_color, 1);
+		int current_y_offset = base_size.height + baseLine;
+
+		// Draw status_text if any
+		if (!status_text.empty()) {
+			int statusBaseLine = 0;
+			cv::Size status_size = cv::getTextSize(status_text, cv::FONT_HERSHEY_SIMPLEX, 0.4, 1, &statusBaseLine);
+			cv::rectangle(bgr, cv::Rect(cv::Point(x, y + current_y_offset), cv::Size(status_size.width, status_size.height + statusBaseLine)), status_bg_color, -1);
+			cv::putText(bgr, status_text, cv::Point(x, y + current_y_offset + status_size.height), cv::FONT_HERSHEY_SIMPLEX, 0.4, status_txt_color, 1);
+			current_y_offset += status_size.height + statusBaseLine;
+		}
 
 		// write the id of the object
-		snprintf(text, sizeof(text), "ID: %d", (int)obj.id);
-		cv::putText(bgr, text, cv::Point(x, y + label_size.height + 15),
+		char id_text[64];
+		snprintf(id_text, sizeof(id_text), "ID: %d", (int)obj.id);
+		int idBaseLine = 0;
+		cv::Size id_size = cv::getTextSize(id_text, cv::FONT_HERSHEY_SIMPLEX, 0.4, 1, &idBaseLine);
+		cv::rectangle(bgr, cv::Rect(cv::Point(x, y + current_y_offset), cv::Size(id_size.width, id_size.height + idBaseLine)), base_bg_color, -1);
+		cv::putText(bgr, id_text, cv::Point(x, y + current_y_offset + id_size.height),
 			    cv::FONT_HERSHEY_SIMPLEX, 0.4, txt_color, 1);
 	}
 }

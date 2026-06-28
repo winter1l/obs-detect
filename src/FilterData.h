@@ -34,6 +34,7 @@ struct filter_data {
 
 	enum FaceStatus { UNKNOWN, CHECKING, IS_ME, NOT_ME };
 	std::unordered_map<uint64_t, FaceStatus> faceStatusCache;
+	std::unordered_map<uint64_t, float> faceSimilarityCache;
 	std::vector<std::vector<float>> referenceFaceFeatures;
 
 	gs_texture_t *previewTexture = nullptr;
@@ -41,8 +42,8 @@ struct filter_data {
 	uint32_t lastTexWidth = 0;
 	uint32_t lastTexHeight = 0;
 
-	std::unique_ptr<yunet::YuNetONNX> yunetModel;
-	std::unique_ptr<sface::SFaceONNX> sfaceModel;
+	std::shared_ptr<yunet::YuNetONNX> yunetModel;
+	std::shared_ptr<sface::SFaceONNX> sfaceModel;
 	bool maskingEnabled;
 	std::string maskingType;
 	int maskingColor;
@@ -58,6 +59,17 @@ struct filter_data {
 	int lastDetectedObjectId;
 	bool sortTracking;
 	bool showUnseenObjects;
+	
+	// Face Statistics
+	bool enableFaceStats;
+	bool enableFaceStatsLog;
+	std::string faceStatsLogPath;
+	std::mutex statsMutex;
+	int statTotalChecks = 0;
+	int statIsMe = 0;
+	int statNotMe = 0;
+	float statSumSimilarity = 0.0f;
+	int similarityHistogram[10] = {0};
 	std::string saveDetectionsPath;
 	bool crop_enabled;
 	int crop_left;

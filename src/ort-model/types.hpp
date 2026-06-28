@@ -16,13 +16,14 @@ struct Object {
 	cv::Rect_<float> rect;
 	int label;
 	float prob;
-	uint64_t id;
-	uint64_t unseenFrames;
+	uint64_t id = 0;
+	uint64_t unseenFrames = 0;
 	cv::KalmanFilter kf;
 	std::deque<cv::Rect_<float>> lastVisibleRects;
 	int hitFrames = 0;
 	bool isExempt = false;
 	bool isUnconfirmed = false;
+	std::string customText = "";
 	cv::Point2f landmarks[5];
 };
 

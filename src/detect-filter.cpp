@@ -62,38 +62,7 @@ static bool visible_on_bool(obs_properties_t *ppts, obs_data_t *settings, const 
 	return true;
 }
 
-static bool enable_advanced_settings(obs_properties_t *ppts, obs_property_t *p,
-				     obs_data_t *settings)
-{
-	const bool enabled = obs_data_get_bool(settings, "advanced");
 
-	for (const char *prop_name :
-	     {"threshold", "useGPU", "numThreads", "model_size", "detected_object", "sort_tracking",
-	      "max_unseen_frames", "show_unseen_objects", "save_detections_path", "crop_group",
-	      "min_size_threshold", "min_hit_frames", "enable_exclude", "enable_face_exclusion"}) {
-		p = obs_properties_get(ppts, prop_name);
-		obs_property_set_visible(p, enabled);
-	}
-
-	bool face_exclude_enabled = enabled && obs_data_get_bool(settings, "enable_face_exclusion");
-	for (const char *prop_name : {"face_category", "person_category", "min_face_area_ratio", "face_inference_interval", "max_exempt_persons", "reference_face_path", "face_match_threshold"}) {
-		p = obs_properties_get(ppts, prop_name);
-		if (p) {
-			obs_property_set_visible(p, face_exclude_enabled);
-		}
-	}
-
-	bool sort_enabled = enabled && obs_data_get_bool(settings, "sort_tracking");
-	for (const char *prop_name :
-	     {"iou_threshold", "instant_track_area_ratio"}) {
-		p = obs_properties_get(ppts, prop_name);
-		if (p) {
-			obs_property_set_visible(p, sort_enabled);
-		}
-	}
-
-	return true;
-}
 
 void set_class_names_on_object_category(obs_property_t *object_category,
 					std::vector<std::string> class_names)
@@ -170,7 +139,6 @@ obs_properties_t *detect_filter_properties(void *data)
 
 	obs_properties_add_bool(props, "preview", obs_module_text("Preview"));
 	obs_properties_add_bool(props, "sync_mode", obs_module_text("SynchronousMode"));
-	obs_properties_add_bool(props, "debug_mode", obs_module_text("DebugMode"));
 
 	// add dropdown selection for object category selection: "All", or COCO classes
 	obs_property_t *object_category =
@@ -178,18 +146,6 @@ obs_properties_t *detect_filter_properties(void *data)
 					OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
 	set_class_names_on_object_category(object_category, edgeyolo_cpp::COCO_CLASSES);
 
-	obs_property_t *reference_face_path =
-		obs_properties_add_path(props, "reference_face_path", obs_module_text("ReferenceFaceImage"),
-					OBS_PATH_DIRECTORY, "", nullptr);
-					
-	obs_property_t *face_match_threshold =
-		obs_properties_add_float_slider(props, "face_match_threshold", obs_module_text("FaceMatchThreshold"),
-						0.0, 1.0, 0.01);
-
-	obs_property_t *person_category =
-		obs_properties_add_list(props, "person_category", obs_module_text("PersonCategory"),
-					OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-	set_class_names_on_object_category(person_category, edgeyolo_cpp::COCO_CLASSES);
 	tf->classNames = edgeyolo_cpp::COCO_CLASSES;
 
 	// options group for masking
@@ -309,11 +265,7 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_property_list_add_string(zoom_object, obs_module_text("Oldest"), "oldest");
 	obs_property_list_add_string(zoom_object, obs_module_text("All"), "all");
 
-	obs_property_t *advanced =
-		obs_properties_add_bool(props, "advanced", obs_module_text("Advanced"));
 
-	// If advanced is selected show the advanced settings, otherwise hide them
-	obs_property_set_modified_callback(advanced, enable_advanced_settings);
 
 	// add a checkable group for crop region settings
 	obs_properties_t *crop_group_props = obs_properties_create();
@@ -354,36 +306,57 @@ obs_properties_t *detect_filter_properties(void *data)
 
 	obs_properties_add_int_slider(props, "min_size_threshold",
 				      obs_module_text("MinSizeThreshold"), 0, 10000, 1);
-	obs_property_t *enable_face_exclusion = obs_properties_add_bool(props, "enable_face_exclusion", obs_module_text("EnableFaceExclusion"));
-	obs_property_t *min_face_area_ratio = obs_properties_add_float_slider(props, "min_face_area_ratio", obs_module_text("MinFaceAreaRatio"), 0.0, 100.0, 0.1);
-	obs_property_t *face_inference_interval = obs_properties_add_int_slider(props, "face_inference_interval", obs_module_text("FaceInferenceInterval"), 1, 120, 1);
-	obs_property_t *max_exempt_persons = obs_properties_add_int_slider(props, "max_exempt_persons", obs_module_text("MaxExemptPersons"), 1, 10, 1);
+	// Face Exclusion Group
+	obs_properties_t *face_ex_group_props = obs_properties_create();
+	obs_property_t *enable_face_exclusion =
+		obs_properties_add_group(props, "enable_face_exclusion", obs_module_text("EnableFaceExclusion"),
+					 OBS_GROUP_CHECKABLE, face_ex_group_props);
 
-	// add SORT tracking enabled checkbox
-	obs_property_t *sort_tracking = obs_properties_add_bool(props, "sort_tracking", obs_module_text("SORTTracking"));
+	obs_property_t *person_category =
+		obs_properties_add_list(face_ex_group_props, "person_category", obs_module_text("PersonCategory"),
+					OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	set_class_names_on_object_category(person_category, edgeyolo_cpp::COCO_CLASSES);
 
-	obs_properties_add_int(props, "min_hit_frames", obs_module_text("MinHitFrames"), 1, 30, 1);
-	obs_property_t *iou_threshold = obs_properties_add_float_slider(props, "iou_threshold", obs_module_text("IouThreshold"), 0.0, 1.0, 0.01);
-	obs_property_t *instant_track_ratio = obs_properties_add_float_slider(props, "instant_track_area_ratio", obs_module_text("InstantTrackAreaRatio"), 0.0, 100.0, 0.1);
+	obs_properties_add_path(face_ex_group_props, "reference_face_path", obs_module_text("ReferenceFaceImage"), OBS_PATH_DIRECTORY, "", nullptr);
+	obs_properties_add_float_slider(face_ex_group_props, "face_match_threshold", obs_module_text("FaceMatchThreshold"), 0.0, 1.0, 0.01);
+	obs_properties_add_float_slider(face_ex_group_props, "min_face_area_ratio", obs_module_text("MinFaceAreaRatio"), 0.0, 100.0, 0.1);
+	obs_properties_add_int_slider(face_ex_group_props, "face_inference_interval", obs_module_text("FaceInferenceInterval"), 1, 120, 1);
+	obs_properties_add_int_slider(face_ex_group_props, "max_exempt_persons", obs_module_text("MaxExemptPersons"), 1, 10, 1);
 
-	obs_property_set_modified_callback(sort_tracking, [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
-		const bool enabled = obs_data_get_bool(settings, "sort_tracking") && obs_data_get_bool(settings, "advanced");
-		obs_property_set_visible(obs_properties_get(props_, "iou_threshold"), enabled);
-		obs_property_set_visible(obs_properties_get(props_, "instant_track_area_ratio"), enabled);
+	// Hide subproperties completely when unchecked
+	obs_property_set_modified_callback(enable_face_exclusion, [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
+		const bool enabled = obs_data_get_bool(settings, "enable_face_exclusion");
+		for (auto prop_name : {"reference_face_path", "face_match_threshold", "min_face_area_ratio", "face_inference_interval", "max_exempt_persons", "person_category"}) {
+			obs_property_t *prop = obs_properties_get(props_, prop_name);
+			if (prop) obs_property_set_visible(prop, enabled);
+		}
 		return true;
 	});
 
-	// add parameter for number of missing frames before a track is considered lost
-	obs_properties_add_int(props, "max_unseen_frames", obs_module_text("MaxUnseenFrames"), 1,
-			       30, 1);
+	// SORT Tracking Group
+	obs_properties_t *sort_group_props = obs_properties_create();
+	obs_property_t *sort_tracking =
+		obs_properties_add_group(props, "sort_tracking", obs_module_text("SORTTracking"),
+					 OBS_GROUP_CHECKABLE, sort_group_props);
 
-	// add option to show unseen objects
-	obs_properties_add_bool(props, "show_unseen_objects", obs_module_text("ShowUnseenObjects"));
+	obs_properties_add_int(sort_group_props, "min_hit_frames", obs_module_text("MinHitFrames"), 1, 30, 1);
+	obs_properties_add_float_slider(sort_group_props, "iou_threshold", obs_module_text("IouThreshold"), 0.0, 1.0, 0.01);
+	obs_properties_add_float_slider(sort_group_props, "instant_track_area_ratio", obs_module_text("InstantTrackAreaRatio"), 0.0, 100.0, 0.1);
+	obs_properties_add_int(sort_group_props, "max_unseen_frames", obs_module_text("MaxUnseenFrames"), 1, 30, 1);
+	obs_properties_add_bool(sort_group_props, "show_unseen_objects", obs_module_text("ShowUnseenObjects"));
 
-	// add file path for saving detections
-	obs_properties_add_path(props, "save_detections_path",
-				obs_module_text("SaveDetectionsPath"), OBS_PATH_FILE_SAVE,
-				"JSON file (*.json);;All files (*.*)", nullptr);
+	// Hide subproperties completely when unchecked
+	obs_property_set_modified_callback(sort_tracking, [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
+		const bool enabled = obs_data_get_bool(settings, "sort_tracking");
+		for (auto prop_name : {"min_hit_frames", "iou_threshold", "instant_track_area_ratio", "max_unseen_frames", "show_unseen_objects"}) {
+			obs_property_t *prop = obs_properties_get(props_, prop_name);
+			if (prop) obs_property_set_visible(prop, enabled);
+		}
+		if (!enabled) {
+			obs_data_set_bool(settings, "show_unseen_objects", true);
+		}
+		return true;
+	});
 
 	/* GPU, CPU and performance Props */
 	obs_property_t *p_use_gpu =
@@ -486,6 +459,24 @@ obs_properties_t *detect_filter_properties(void *data)
 		},
 		tf);
 
+	// Debug & Statistics Group (At the very bottom)
+	obs_properties_t *debug_group_props = obs_properties_create();
+	obs_properties_add_group(props, "debug_group", obs_module_text("DebugGroup"), OBS_GROUP_NORMAL, debug_group_props);
+
+	obs_properties_add_bool(debug_group_props, "debug_mode", obs_module_text("DebugMode"));
+	obs_properties_add_bool(debug_group_props, "enable_face_stats", obs_module_text("ShowFaceSimilarityStats"));
+	
+	obs_property_t *enable_face_stats_log = obs_properties_add_bool(debug_group_props, "enable_face_stats_log", obs_module_text("SaveFaceStatsToCSV"));
+	obs_properties_add_path(debug_group_props, "face_stats_log_path", obs_module_text("SaveFaceStatsCSVPath"), OBS_PATH_FILE_SAVE, "CSV file (*.csv);;All files (*.*)", nullptr);
+	obs_properties_add_path(debug_group_props, "save_detections_path", obs_module_text("SaveDetectionsPath"), OBS_PATH_FILE_SAVE, "JSON file (*.json);;All files (*.*)", nullptr);
+
+	obs_property_set_modified_callback(enable_face_stats_log, [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
+		const bool enabled = obs_data_get_bool(settings, "enable_face_stats_log");
+		obs_property_t *prop = obs_properties_get(props_, "face_stats_log_path");
+		if (prop) obs_property_set_visible(prop, enabled);
+		return true;
+	});
+
 	// Add a informative text about the plugin
 	std::string basic_info =
 		std::regex_replace(PLUGIN_INFO_TEMPLATE, std::regex("%1"), PLUGIN_VERSION);
@@ -497,7 +488,6 @@ obs_properties_t *detect_filter_properties(void *data)
 
 void detect_filter_defaults(obs_data_t *settings)
 {
-	obs_data_set_default_bool(settings, "advanced", false);
 #if _WIN32
 	obs_data_set_default_string(settings, "useGPU", USEGPU_DML);
 #elif defined(__APPLE__)
@@ -515,6 +505,9 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_double(settings, "min_face_area_ratio", 2.0);
 	obs_data_set_default_int(settings, "face_inference_interval", 30);
 	obs_data_set_default_int(settings, "max_exempt_persons", 1);
+	obs_data_set_default_bool(settings, "enable_face_stats", false);
+	obs_data_set_default_bool(settings, "enable_face_stats_log", false);
+	obs_data_set_default_string(settings, "face_stats_log_path", "");
 	obs_data_set_default_int(settings, "person_category", 0);
 	obs_data_set_default_int(settings, "max_unseen_frames", 10);
 	obs_data_set_default_bool(settings, "show_unseen_objects", true);
@@ -594,6 +587,10 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	tf->minAreaThreshold = (int)obs_data_get_int(settings, "min_size_threshold");
 	tf->maxExemptPersons = (int)obs_data_get_int(settings, "max_exempt_persons");
 	tf->minHitFrames = (int)obs_data_get_int(settings, "min_hit_frames");
+	tf->enableFaceStats = obs_data_get_bool(settings, "enable_face_stats");
+	tf->enableFaceStatsLog = obs_data_get_bool(settings, "enable_face_stats_log");
+	tf->faceStatsLogPath = obs_data_get_string(settings, "face_stats_log_path");
+
 	if (tf->tracker.getMinHitFrames() != tf->minHitFrames) {
 		tf->tracker.setMinHitFrames(tf->minHitFrames);
 	}
@@ -794,11 +791,13 @@ void detect_filter_update(void *data, obs_data_t *settings)
 				std::wstring s_wstr(s_len, L'\0');
 				MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, sface_raw, -1, s_wstr.data(), s_len);
 				
-				tf->yunetModel = std::make_unique<yunet::YuNetONNX>(y_wstr, 1, 50, 1, "cpu", 0, false, 0.45f, 0.5f);
-				tf->sfaceModel = std::make_unique<sface::SFaceONNX>(s_wstr, 1, 1, "cpu", 0, false);
+				std::lock_guard<std::mutex> lock(tf->faceInferenceMutex);
+				tf->yunetModel = std::make_shared<yunet::YuNetONNX>(y_wstr, 1, 50, 1, "cpu", 0, false, 0.45f, 0.5f);
+				tf->sfaceModel = std::make_shared<sface::SFaceONNX>(s_wstr, 1, 1, "cpu", 0, false);
 #else
-				tf->yunetModel = std::make_unique<yunet::YuNetONNX>(std::string(yunet_raw), 1, 50, 1, "cpu", 0, false, 0.45f, 0.5f);
-				tf->sfaceModel = std::make_unique<sface::SFaceONNX>(std::string(sface_raw), 1, 1, "cpu", 0, false);
+				std::lock_guard<std::mutex> lock(tf->faceInferenceMutex);
+				tf->yunetModel = std::make_shared<yunet::YuNetONNX>(std::string(yunet_raw), 1, 50, 1, "cpu", 0, false, 0.45f, 0.5f);
+				tf->sfaceModel = std::make_shared<sface::SFaceONNX>(std::string(sface_raw), 1, 1, "cpu", 0, false);
 #endif
 			}
 			if (yunet_raw) bfree(yunet_raw);
@@ -872,15 +871,18 @@ void detect_filter_update(void *data, obs_data_t *settings)
 			}
 		} catch (const std::exception &e) {
 			obs_log(LOG_ERROR, "Failed to load face recognition models: %s", e.what());
+			std::lock_guard<std::mutex> lock(tf->faceInferenceMutex);
 			tf->yunetModel.reset();
 			tf->sfaceModel.reset();
 			tf->referenceFaceFeatures.clear();
 		}
 	} else {
+		std::lock_guard<std::mutex> lock(tf->faceInferenceMutex);
 		tf->yunetModel.reset();
 		tf->sfaceModel.reset();
 		tf->referenceFaceFeatures.clear();
 		tf->faceStatusCache.clear();
+		tf->faceSimilarityCache.clear();
 		tf->faceExemptIds.clear();
 	}
 
@@ -1070,7 +1072,7 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 			// Throttle Check
 			if (tf->frameCount % tf->faceInferenceInterval == 0) {
 				if (obj.rect.area() < minPersonAreaPixels) {
-					obs_log(LOG_INFO, "Face check skipped for obj %llu: area %.0f < min %.0f", (unsigned long long)obj.id, obj.rect.area(), minPersonAreaPixels);
+					// obs_log(LOG_INFO, "Face check skipped for obj %llu: area %.0f < min %.0f", (unsigned long long)obj.id, obj.rect.area(), minPersonAreaPixels);
 				} else {
 					tf->faceStatusCache[obj.id] = filter_data::FaceStatus::CHECKING;
 					to_check.push_back(obj);
@@ -1183,7 +1185,46 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 			drawDashedRectangle(frame, cropRect, cv::Scalar(0, 255, 0), 5, 8, 15);
 		}
 		if (tf->preview && all_objects.size() > 0) {
-			draw_objects(frame, all_objects, tf->classNames);
+			if (tf->enableFaceExclusion && tf->minFaceAreaRatio > 0.0f) {
+				float screenArea = (float)(imageBGRA.cols * imageBGRA.rows);
+				float minPersonAreaPixels = screenArea * (tf->minFaceAreaRatio / 100.0f);
+				for (Object &obj : all_objects) {
+					if (tf->personCategory != -1 && obj.label != tf->personCategory) continue;
+					
+					if (obj.rect.area() < minPersonAreaPixels) {
+						obj.customText = "Too Small for Face Check";
+					} else {
+						float sim = 0.0f;
+						bool has_sim = false;
+						{
+							std::lock_guard<std::mutex> lock(tf->outputLock);
+							if (tf->faceSimilarityCache.count(obj.id)) {
+								sim = tf->faceSimilarityCache[obj.id];
+								has_sim = true;
+							}
+						}
+						if (has_sim) {
+							char buf[64];
+							snprintf(buf, sizeof(buf), "Sim: %.2f", sim);
+							if (obj.isExempt) {
+								obj.customText = std::string("Exempted / ") + buf;
+							} else if (sim < tf->faceMatchThreshold) {
+								obj.customText = std::string("Not Me / ") + buf;
+							} else {
+								obj.customText = std::string("Checking / ") + buf;
+							}
+						} else {
+							obj.customText = "Checking Face...";
+						}
+					}
+				}
+			}
+		}
+		
+		cv::Mat overlay = cv::Mat::zeros(frame.size(), CV_8UC4);
+
+		if (tf->preview) {
+			draw_objects(overlay, all_objects, tf->classNames);
 		}
 		if (tf->maskingEnabled) {
 			cv::Mat mask = cv::Mat::zeros(frame.size(), CV_8UC1);
@@ -1209,11 +1250,67 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 		if (tf->debugMode) {
 			char debugText[128];
 			snprintf(debugText, sizeof(debugText), "FPS: %.1f | Latency: %.1fms", tf->currentInferenceFPS, tf->currentInferenceTimeMs);
-			cv::putText(frame, debugText, cv::Point(20, 50), cv::FONT_HERSHEY_SIMPLEX, 1.5, cv::Scalar(0, 0, 255), 3, cv::LINE_AA);
+			cv::putText(overlay, debugText, cv::Point(20, 50), cv::FONT_HERSHEY_SIMPLEX, 1.5, cv::Scalar(0, 0, 255, 255), 3, cv::LINE_AA);
+		}
+
+		if (tf->enableFaceStats) {
+			int tChecks, tIsMe, tNotMe;
+			float tSumSim;
+			int hist[10];
+			{
+				std::lock_guard<std::mutex> statLock(tf->statsMutex);
+				tChecks = tf->statTotalChecks;
+				tIsMe = tf->statIsMe;
+				tNotMe = tf->statNotMe;
+				tSumSim = tf->statSumSimilarity;
+				for (int i=0; i<10; i++) hist[i] = tf->similarityHistogram[i];
+			}
+			
+			int panelWidth = 300;
+			int panelHeight = 200;
+			int padding = 20;
+			int startX = frame.cols - panelWidth - padding;
+			int startY = padding;
+			
+			cv::Mat stats_overlay = cv::Mat::zeros(frame.size(), CV_8UC4);
+			cv::rectangle(stats_overlay, cv::Rect(startX, startY, panelWidth, panelHeight), cv::Scalar(0, 0, 0, 180), -1);
+			cv::addWeighted(overlay, 1.0, stats_overlay, 1.0, 0, overlay);
+			
+			char txt[128];
+			snprintf(txt, sizeof(txt), "Face Stats (Total: %d)", tChecks);
+			cv::putText(overlay, txt, cv::Point(startX + 10, startY + 25), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255,255,255,255), 1);
+			
+			snprintf(txt, sizeof(txt), "IS_ME: %d | NOT_ME: %d", tIsMe, tNotMe);
+			cv::putText(overlay, txt, cv::Point(startX + 10, startY + 45), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0,255,0,255), 1);
+			
+			float avgSim = (tChecks > 0) ? (tSumSim / tChecks) : 0.0f;
+			snprintf(txt, sizeof(txt), "Avg Similarity: %.3f", avgSim);
+			cv::putText(overlay, txt, cv::Point(startX + 10, startY + 65), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0,255,255,255), 1);
+			
+			int histX = startX + 10;
+			int histY = startY + 180;
+			int histW = panelWidth - 20;
+			int histH = 100;
+			int barW = histW / 10;
+			
+			int maxCount = 1;
+			for (int i=0; i<10; i++) {
+				if (hist[i] > maxCount) maxCount = hist[i];
+			}
+			
+			for (int i=0; i<10; i++) {
+				int barHeight = (int)(((float)hist[i] / maxCount) * histH);
+				cv::Rect barRect(histX + i*barW, histY - barHeight, barW - 2, barHeight);
+				cv::Scalar barColor = (i >= (int)(tf->faceMatchThreshold * 10.0f)) ? cv::Scalar(0,200,0,255) : cv::Scalar(0,0,200,255);
+				cv::rectangle(overlay, barRect, barColor, -1);
+				
+				snprintf(txt, sizeof(txt), ".%d", i);
+				cv::putText(overlay, txt, cv::Point(histX + i*barW + 2, histY + 12), cv::FONT_HERSHEY_SIMPLEX, 0.3, cv::Scalar(200,200,200,255), 1);
+			}
 		}
 
 		std::lock_guard<std::mutex> lock(tf->outputLock);
-		cv::cvtColor(frame, tf->outputPreviewBGRA, cv::COLOR_BGR2BGRA);
+		tf->outputPreviewBGRA = overlay.clone();
 	}
 
 	auto end_time = std::chrono::high_resolution_clock::now();
@@ -1356,6 +1453,8 @@ static void face_inference_thread_loop(struct detect_filter *tf)
 	while (!tf->stopFaceInferenceThread) {
 		std::vector<Object> to_check;
 		cv::Mat imageBGRA;
+		std::shared_ptr<yunet::YuNetONNX> local_yunet;
+		std::shared_ptr<sface::SFaceONNX> local_sface;
 		
 		{
 			std::unique_lock<std::mutex> lock(tf->faceInferenceMutex);
@@ -1370,9 +1469,11 @@ static void face_inference_thread_loop(struct detect_filter *tf)
 			to_check = std::move(tf->faceInferenceQueue);
 			tf->faceInferenceQueue.clear();
 			imageBGRA = tf->faceInferenceFrame.clone();
+			local_yunet = tf->yunetModel;
+			local_sface = tf->sfaceModel;
 		}
 
-		if (imageBGRA.empty() || !tf->yunetModel || !tf->sfaceModel) {
+		if (imageBGRA.empty() || !local_yunet || !local_sface) {
 			continue;
 		}
 
@@ -1387,21 +1488,53 @@ static void face_inference_thread_loop(struct detect_filter *tf)
 				cv::Mat croppedBGR;
 				cv::cvtColor(cropped, croppedBGR, cv::COLOR_BGRA2BGR);
 				
-				std::vector<Object> faces = tf->yunetModel->inference(croppedBGR);
+				std::vector<Object> faces = local_yunet->inference(croppedBGR);
 				bool is_me = false;
 				if (!faces.empty()) {
-					std::vector<float> feat = tf->sfaceModel->inference(croppedBGR, faces[0].landmarks);
+					std::vector<float> feat = local_sface->inference(croppedBGR, faces[0].landmarks);
 					float max_sim = -1.0f;
 					for (const auto& refFeat : tf->referenceFaceFeatures) {
 						float sim = sface::SFaceONNX::match(feat, refFeat);
 						if (sim > max_sim) max_sim = sim;
 					}
 					obs_log(LOG_INFO, "Face matched for obj %llu: similarity %.3f (threshold %.3f)", (unsigned long long)obj.id, max_sim, tf->faceMatchThreshold);
+					
+					{
+						std::lock_guard<std::mutex> lock(tf->outputLock);
+						tf->faceSimilarityCache[obj.id] = max_sim;
+					}
+
 					if (max_sim >= tf->faceMatchThreshold) {
 						is_me = true;
 					}
+
+					if (tf->enableFaceStats) {
+						std::lock_guard<std::mutex> statLock(tf->statsMutex);
+						tf->statTotalChecks++;
+						tf->statSumSimilarity += max_sim;
+						if (is_me) tf->statIsMe++; else tf->statNotMe++;
+						int bin = std::max(0, std::min(9, (int)(max_sim * 10.0f)));
+						tf->similarityHistogram[bin]++;
+					}
+
+					if (!tf->faceStatsLogPath.empty() && tf->enableFaceStatsLog) {
+						std::string logPath = tf->faceStatsLogPath;
+						float sim_val = max_sim;
+						uint64_t oid = obj.id;
+						bool is_me_val = is_me;
+						std::thread([logPath, sim_val, oid, is_me_val]() {
+							std::ofstream f(logPath, std::ios::app);
+							if (f.is_open()) {
+								auto now = std::chrono::system_clock::now();
+								auto in_time_t = std::chrono::system_clock::to_time_t(now);
+								char time_buf[100];
+								std::strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", std::localtime(&in_time_t));
+								f << time_buf << "," << oid << "," << sim_val << "," << (is_me_val ? "IS_ME" : "NOT_ME") << "\n";
+							}
+						}).detach();
+					}
 				} else {
-					obs_log(LOG_INFO, "No face detected in cropped region for obj %llu", (unsigned long long)obj.id);
+					// obs_log(LOG_INFO, "No face detected in cropped region for obj %llu", (unsigned long long)obj.id);
 				}
 				
 				if (is_me) {
@@ -1576,8 +1709,8 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 		return;
 	}
 
-	// if preview is enabled, render the image
-	if (tf->preview || tf->maskingEnabled) {
+	// if preview, masking, debug stats, or debug mode is enabled, render the image
+	if (tf->preview || tf->maskingEnabled || tf->debugMode || tf->enableFaceStats) {
 		cv::Mat outputBGRA, outputMask;
 		{
 			// lock the outputLock mutex
@@ -1600,24 +1733,9 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 			outputMask = tf->outputMask.clone();
 		}
 
-		gs_texture_t *tex = nullptr;
+		gs_texture_t *tex = gs_texrender_get_texture(tf->texrender);
 		bool destroy_tex = false;
 		
-		if (tf->preview || tf->debugMode) {
-			if (!tf->previewTexture || tf->lastTexWidth != width || tf->lastTexHeight != height) {
-				if (tf->previewTexture) gs_texture_destroy(tf->previewTexture);
-				tf->previewTexture = gs_texture_create(width, height, GS_BGRA, 1,
-							      (const uint8_t **)&outputBGRA.data, GS_DYNAMIC);
-			} else {
-				gs_texture_set_image(tf->previewTexture, outputBGRA.data, width * 4, false);
-			}
-			tex = tf->previewTexture;
-			destroy_tex = false; // It's cached now
-		} else {
-			tex = gs_texrender_get_texture(tf->texrender);
-			destroy_tex = false;
-		}
-
 		std::string technique_name = "Draw";
 		gs_eparam_t *imageParam = gs_effect_get_param_by_name(tf->maskingEffect, "image");
 		gs_eparam_t *maskParam =
@@ -1660,6 +1778,26 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 
 		if (destroy_tex) {
 			gs_texture_destroy(tex);
+		}
+		
+		if (tf->preview || tf->debugMode || tf->enableFaceStats) {
+			if (!tf->previewTexture || tf->lastTexWidth != width || tf->lastTexHeight != height) {
+				if (tf->previewTexture) gs_texture_destroy(tf->previewTexture);
+				tf->previewTexture = gs_texture_create(width, height, GS_BGRA, 1,
+							      (const uint8_t **)&outputBGRA.data, GS_DYNAMIC);
+			} else {
+				gs_texture_set_image(tf->previewTexture, outputBGRA.data, width * 4, false);
+			}
+			
+			gs_blend_state_push();
+			gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
+			gs_effect_t *default_effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+			gs_eparam_t *defaultImageParam = gs_effect_get_param_by_name(default_effect, "image");
+			gs_effect_set_texture(defaultImageParam, tf->previewTexture);
+			while (gs_effect_loop(default_effect, "Draw")) {
+				gs_draw_sprite(tf->previewTexture, 0, 0, 0);
+			}
+			gs_blend_state_pop();
 		}
 		
 		tf->lastTexWidth = width;

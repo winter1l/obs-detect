@@ -18,6 +18,7 @@
 !FACE_GUIDE_KR.md
 !/vendor
 !.agents
+!.agent
 
 # Exclude lock files
 *.lock.json
