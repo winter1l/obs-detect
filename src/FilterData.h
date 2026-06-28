@@ -58,6 +58,8 @@ struct filter_data {
 	int maskingBlurRadius;
 	int maskingDilateIterations;
 	bool maskingDynamicExpansion;
+	float maskingDynamicExpansionBase;
+	float maskingDynamicExpansionRatio;
 	bool trackingEnabled;
 	float zoomFactor;
 	float zoomSpeedFactor;
