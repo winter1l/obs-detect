@@ -1573,13 +1573,29 @@ static void face_inference_thread_loop(struct detect_filter *tf)
 
 			bool is_already_face = (obj.label < tf->classNames.size() && 
 			                        (tf->classNames[obj.label] == "face" || tf->classNames[obj.label] == "head"));
-			cv::Rect_<float> crop_box;
+			bool has_valid_landmarks = false;
 			if (is_already_face) {
+				if (std::abs(obj.landmarks[0].x - obj.landmarks[1].x) > 1e-3 || 
+				    std::abs(obj.landmarks[0].y - obj.landmarks[1].y) > 1e-3) {
+					has_valid_landmarks = true;
+				}
+			}
+			
+			cv::Rect_<float> crop_box;
+			if (is_already_face && has_valid_landmarks) {
 				// SFace can align the face directly from the full BGR frame using absolute landmarks
 				crop_box = cv::Rect_<float>(0, 0, (float)imageBGRA.cols, (float)imageBGRA.rows);
 			} else {
-				// Use the full person box (100% crop) to avoid cutting the face
+				// Use the full person box or expand the face box slightly to allow YuNet to detect it
 				crop_box = obj.rect;
+				if (is_already_face && !has_valid_landmarks) {
+					float margin_w = crop_box.width * 0.2f;
+					float margin_h = crop_box.height * 0.2f;
+					crop_box.x -= margin_w;
+					crop_box.y -= margin_h;
+					crop_box.width += margin_w * 2.0f;
+					crop_box.height += margin_h * 2.0f;
+				}
 			}
 			cv::Rect crop_rect = crop_box & cv::Rect_<float>(0, 0, (float)imageBGRA.cols, (float)imageBGRA.rows);
 			
@@ -1589,8 +1605,8 @@ static void face_inference_thread_loop(struct detect_filter *tf)
 				cv::cvtColor(cropped, croppedBGR, cv::COLOR_BGRA2BGR);
 				
 				std::vector<Object> faces;
-				if (is_already_face) {
-					// We already have the landmarks from the main thread YuNet!
+				if (is_already_face && has_valid_landmarks) {
+					// We already have the landmarks from the main thread!
 					// They are relative to the full frame. We need to shift them to match croppedBGR.
 					Object shifted_face = obj;
 					for (int l = 0; l < 5; ++l) {
@@ -1606,8 +1622,8 @@ static void face_inference_thread_loop(struct detect_filter *tf)
 				
 				bool is_me = false;
 				if (!faces.empty()) {
-					// Only store debug boxes and sort if we actually ran YuNet in the background (i.e. not is_already_face)
-					if (!is_already_face) {
+					// Only store debug boxes and sort if we actually ran YuNet in the background
+					if (!(is_already_face && has_valid_landmarks)) {
 						// Store all detected faces in absolute coordinates for debug overlay
 						std::vector<DebugFaceBox> new_debug_boxes;
 						for (const auto& face : faces) {
