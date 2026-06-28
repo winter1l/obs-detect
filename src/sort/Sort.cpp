@@ -277,11 +277,10 @@ std::vector<Object> Sort::update(const std::vector<Object> &detections)
 			
 			if (best_det_idx != -1) {
 				int j = best_det_idx;
-				if (trackedObjects[i].unseenFrames > 0) {
-					trackedObjects[i].lastVisibleRects.clear();
-				}
-				
-				trackedObjects[i].rect = updateKalmanFilter(trackedObjects[i].kf, detections[j].rect);
+				// 칼만 필터의 느린 추적을 우회하고 새 대상의 위치로 즉시 이동 (Instant Teleport)
+				trackedObjects[i].rect = detections[j].rect;
+				// 칼만 필터의 내부 상태를 새 위치로 강제 초기화하여 다음 프레임부터 정상 속도로 추적되게 함
+				initializeKalmanFilter(trackedObjects[i].kf, detections[j].rect);
 				trackedObjects[i].unseenFrames = 0;
 				trackedObjects[i].hitFrames++;
 				trackedObjects[i].trackingState = "Recovered";
