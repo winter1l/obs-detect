@@ -24,6 +24,7 @@ struct Object {
 	bool isExempt = false;
 	bool isUnconfirmed = false;
 	std::string customText = "";
+	std::string trackingState = "";
 	cv::Point2f landmarks[5];
 };
 

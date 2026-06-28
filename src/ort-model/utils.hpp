@@ -130,7 +130,7 @@ static void draw_objects(cv::Mat bgr, const std::vector<Object> &objects,
 
 		int current_y_offset = base_size.height + baseLine;
 
-		// Draw status_text if any
+		// Draw status_text (face recognition status) if any
 		if (!status_text.empty()) {
 			int statusBaseLine = 0;
 			cv::Size status_size = cv::getTextSize(status_text, cv::FONT_HERSHEY_SIMPLEX, 0.4, 1, &statusBaseLine);
@@ -139,14 +139,38 @@ static void draw_objects(cv::Mat bgr, const std::vector<Object> &objects,
 			current_y_offset += status_size.height + statusBaseLine;
 		}
 
-		// write the id of the object
+		// Draw trackingState if any
+		if (!obj.trackingState.empty()) {
+			cv::Scalar track_bg_color = cv::Scalar(128, 128, 128, 255); // Default Gray (BGR)
+			cv::Scalar track_txt_color = cv::Scalar(255, 255, 255, 255); // White text
+			
+			if (obj.trackingState.find("Stable") != std::string::npos) {
+				track_bg_color = cv::Scalar(0, 150, 0, 255); // Green (BGR)
+			} else if (obj.trackingState.find("New") != std::string::npos) {
+				track_bg_color = cv::Scalar(0, 140, 255, 255); // Orange (BGR)
+			} else if (obj.trackingState.find("Unseen") != std::string::npos) {
+				track_bg_color = cv::Scalar(100, 100, 100, 255); // Dark Gray (BGR)
+			} else if (obj.trackingState.find("Recovered") != std::string::npos) {
+				track_bg_color = cv::Scalar(180, 0, 180, 255); // Purple (BGR)
+			}
+			
+			int trackBaseLine = 0;
+			cv::Size track_size = cv::getTextSize(obj.trackingState, cv::FONT_HERSHEY_SIMPLEX, 0.4, 1, &trackBaseLine);
+			cv::rectangle(bgr, cv::Rect(cv::Point(x, y + current_y_offset), cv::Size(track_size.width, track_size.height + trackBaseLine)), track_bg_color, -1);
+			cv::putText(bgr, obj.trackingState, cv::Point(x, y + current_y_offset + track_size.height), cv::FONT_HERSHEY_SIMPLEX, 0.4, track_txt_color, 1);
+			current_y_offset += track_size.height + trackBaseLine;
+		}
+
+		// write the id of the object (no background)
 		char id_text[64];
 		snprintf(id_text, sizeof(id_text), "ID: %d", (int)obj.id);
 		int idBaseLine = 0;
 		cv::Size id_size = cv::getTextSize(id_text, cv::FONT_HERSHEY_SIMPLEX, 0.4, 1, &idBaseLine);
-		cv::rectangle(bgr, cv::Rect(cv::Point(x, y + current_y_offset), cv::Size(id_size.width, id_size.height + idBaseLine)), base_bg_color, -1);
+		// Draw ID text with a thin black border for readability on light backgrounds
 		cv::putText(bgr, id_text, cv::Point(x, y + current_y_offset + id_size.height),
-			    cv::FONT_HERSHEY_SIMPLEX, 0.4, txt_color, 1);
+			    cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(0, 0, 0, 255), 2, cv::LINE_AA);
+		cv::putText(bgr, id_text, cv::Point(x, y + current_y_offset + id_size.height),
+			    cv::FONT_HERSHEY_SIMPLEX, 0.4, txt_color, 1, cv::LINE_AA);
 	}
 }
 
