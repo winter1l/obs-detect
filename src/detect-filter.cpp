@@ -365,11 +365,12 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_add_float_slider(sort_group_props, "instant_track_area_ratio", obs_module_text("InstantTrackAreaRatio"), 0.0, 100.0, 0.1);
 	obs_properties_add_int(sort_group_props, "max_unseen_frames", obs_module_text("MaxUnseenFrames"), 1, 30, 1);
 	obs_properties_add_bool(sort_group_props, "show_unseen_objects", obs_module_text("ShowUnseenObjects"));
+	obs_properties_add_float_slider(sort_group_props, "ghost_recovery_multiplier", obs_module_text("GhostRecoveryMultiplier"), 0.5, 5.0, 0.1);
 
 	// Hide subproperties completely when unchecked
 	obs_property_set_modified_callback(sort_tracking, [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
 		const bool enabled = obs_data_get_bool(settings, "sort_tracking");
-		for (auto prop_name : {"min_hit_frames", "iou_threshold", "instant_track_area_ratio", "max_unseen_frames", "show_unseen_objects"}) {
+		for (auto prop_name : {"min_hit_frames", "iou_threshold", "instant_track_area_ratio", "max_unseen_frames", "show_unseen_objects", "ghost_recovery_multiplier"}) {
 			obs_property_t *prop = obs_properties_get(props_, prop_name);
 			if (prop) obs_property_set_visible(prop, enabled);
 		}
@@ -576,6 +577,7 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "crop_right", 0);
 	obs_data_set_default_int(settings, "crop_top", 0);
 	obs_data_set_default_int(settings, "crop_bottom", 0);
+	obs_data_set_default_double(settings, "ghost_recovery_multiplier", 2.0);
 }
 
 void detect_filter_update(void *data, obs_data_t *settings)
@@ -642,6 +644,10 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	float instant_track_area_ratio = (float)obs_data_get_double(settings, "instant_track_area_ratio");
 	if (tf->tracker.getInstantTrackAreaRatio() != instant_track_area_ratio) {
 		tf->tracker.setInstantTrackAreaRatio(instant_track_area_ratio);
+	}
+	float ghost_recovery_multiplier = (float)obs_data_get_double(settings, "ghost_recovery_multiplier");
+	if (tf->tracker.getGhostRecoveryMultiplier() != ghost_recovery_multiplier) {
+		tf->tracker.setGhostRecoveryMultiplier(ghost_recovery_multiplier);
 	}
 
 	// check if tracking state has changed

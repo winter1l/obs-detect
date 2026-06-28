@@ -66,6 +66,15 @@ public:
 	// Get Screen Area
 	float getScreenArea() const { return this->screenArea; }
 
+	// Set Ghost Recovery Multiplier
+	void setGhostRecoveryMultiplier(float multiplier)
+	{
+		this->ghostRecoveryMultiplier = multiplier;
+	}
+
+	// Get Ghost Recovery Multiplier
+	float getGhostRecoveryMultiplier() const { return this->ghostRecoveryMultiplier; }
+
 private:
 	// Private methods for the Kalman filter and other internal workings
 	void initializeKalmanFilter(cv::KalmanFilter &kf, const cv::Rect_<float> &bbox);
@@ -80,6 +89,7 @@ private:
 	float iouThreshold = 0.3f;
 	float instantTrackAreaRatio = 0.0f;
 	float screenArea = 0.0f;
+	float ghostRecoveryMultiplier = 2.0f;
 };
 
 #endif

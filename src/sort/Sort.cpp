@@ -15,7 +15,7 @@
 #define INF std::numeric_limits<float>::infinity()
 
 // Constructor
-Sort::Sort(size_t maxUnseenFrames) : nextTrackID(0), maxUnseenFrames(maxUnseenFrames), minHitFrames(1)
+Sort::Sort(size_t maxUnseenFrames) : nextTrackID(0), maxUnseenFrames(maxUnseenFrames), minHitFrames(1), ghostRecoveryMultiplier(2.0f)
 {
 }
 
@@ -235,6 +235,56 @@ std::vector<Object> Sort::update(const std::vector<Object> &detections)
 				detectionUsed[j] = true;
 				trackedObjectUsed[i] = true;
 				break;
+			}
+		}
+	}
+
+	// Ghost recovery for short-lived tracks (hitFrames <= 5) that went missing
+	for (size_t i = 0; i < trackedObjects.size(); ++i) {
+		if (trackedObjectUsed[i]) continue;
+		
+		if (trackedObjects[i].hitFrames <= 5) {
+			float best_dist = std::numeric_limits<float>::max();
+			int best_det_idx = -1;
+			
+			float t_cx = trackedObjects[i].rect.x + trackedObjects[i].rect.width / 2.0f;
+			float t_cy = trackedObjects[i].rect.y + trackedObjects[i].rect.height / 2.0f;
+			float size_ref = std::max(trackedObjects[i].rect.width, trackedObjects[i].rect.height);
+			float max_dist = size_ref * this->ghostRecoveryMultiplier;
+			
+			for (size_t j = 0; j < numDetections; ++j) {
+				if (detectionUsed[j]) continue;
+				if (trackedObjects[i].label != detections[j].label) continue;
+				
+				float d_cx = detections[j].rect.x + detections[j].rect.width / 2.0f;
+				float d_cy = detections[j].rect.y + detections[j].rect.height / 2.0f;
+				
+				float dist = std::sqrt((d_cx - t_cx) * (d_cx - t_cx) + (d_cy - t_cy) * (d_cy - t_cy));
+				if (dist < max_dist && dist < best_dist) {
+					best_dist = dist;
+					best_det_idx = (int)j;
+				}
+			}
+			
+			if (best_det_idx != -1) {
+				int j = best_det_idx;
+				if (trackedObjects[i].unseenFrames > 0) {
+					trackedObjects[i].lastVisibleRects.clear();
+				}
+				
+				trackedObjects[i].rect = updateKalmanFilter(trackedObjects[i].kf, detections[j].rect);
+				trackedObjects[i].unseenFrames = 0;
+				trackedObjects[i].hitFrames++;
+				
+				trackedObjects[i].lastVisibleRects.push_back(trackedObjects[i].rect);
+				if (trackedObjects[i].lastVisibleRects.size() > 3) {
+					trackedObjects[i].lastVisibleRects.pop_front();
+				}
+				trackedObjects[i].label = detections[j].label;
+				trackedObjects[i].prob = detections[j].prob;
+				
+				detectionUsed[j] = true;
+				trackedObjectUsed[i] = true;
 			}
 		}
 	}
