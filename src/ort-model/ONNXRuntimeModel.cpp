@@ -67,13 +67,27 @@ ONNXRuntimeModel::ONNXRuntimeModel(file_name_t path_to_model, int intra_op_num_t
 		auto input_tensor_type = input_shape_info.GetElementType();
 
 		// assume input shape is NCHW
+		if (input_shape.size() > 2 && input_shape[2] <= 0) {
+			input_shape[2] = 640;
+		}
+		if (input_shape.size() > 3 && input_shape[3] <= 0) {
+			input_shape[3] = 640;
+		}
+
 		this->input_h_.push_back((int)(input_shape[2]));
 		this->input_w_.push_back((int)(input_shape[3]));
 
 		// Allocate input memory buffer
 		this->input_name_.push_back(
 			std::string(this->session_.GetInputNameAllocated(i, ort_alloc).get()));
-		size_t input_byte_count = sizeof(float) * input_shape_info.GetElementCount();
+
+		size_t element_count = 1;
+		for (auto dim : input_shape) {
+			if (dim <= 0) dim = 1;
+			element_count *= dim;
+		}
+		size_t input_byte_count = sizeof(float) * element_count;
+
 		std::unique_ptr<uint8_t[]> input_buffer =
 			std::make_unique<uint8_t[]>(input_byte_count);
 		auto input_memory_info =

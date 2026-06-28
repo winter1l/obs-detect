@@ -38,10 +38,15 @@
 #include "ort-model/utils.hpp"
 #include "detect-filter-utils.h"
 #include "edgeyolo/edgeyolo_onnxruntime.hpp"
+#include "ort-model/YOLOv8FaceONNX.hpp"
+#include "ort-model/SCRFDONNX.hpp"
 #include "yunet/YuNet.h"
 
 #define EXTERNAL_MODEL_SIZE "!!!EXTERNAL_MODEL!!!"
-#define FACE_DETECT_MODEL_SIZE "!!!FACE_DETECT!!!"
+#define FACE_YUNET_MODEL_SIZE "!!!FACE_YUNET!!!"
+#define FACE_YOLO_N_MODEL_SIZE "!!!FACE_YOLO_N!!!"
+#define FACE_YOLO_S_MODEL_SIZE "!!!FACE_YOLO_S!!!"
+#define FACE_SCRFD_MODEL_SIZE "!!!FACE_SCRFD!!!"
 
 struct detect_filter : public filter_data {};
 
@@ -199,9 +204,7 @@ obs_properties_t *detect_filter_properties(void *data)
 				      obs_module_text("MaskingBlurRadius"), 1, 30, 1);
 
 	// add callback to show/hide blur radius and color picker
-	obs_property_set_modified_callback(masking_type, [](obs_properties_t *props_,
-							    obs_property_t *,
-							    obs_data_t *settings) {
+	auto update_masking_visibility = [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
 		std::string masking_type_value = obs_data_get_string(settings, "masking_type");
 		obs_property_t *masking_color = obs_properties_get(props_, "masking_color");
 		obs_property_t *masking_blur_radius =
@@ -210,11 +213,20 @@ obs_properties_t *detect_filter_properties(void *data)
 			obs_properties_get(props_, "masking_dilate_iterations");
 		obs_property_t *masking_dynamic_expansion =
 			obs_properties_get(props_, "masking_dynamic_expansion");
+		obs_property_t *masking_dynamic_base =
+			obs_properties_get(props_, "masking_dynamic_expansion_base");
+		obs_property_t *masking_dynamic_ratio =
+			obs_properties_get(props_, "masking_dynamic_expansion_ratio");
+
 		obs_property_set_visible(masking_color, false);
 		obs_property_set_visible(masking_blur_radius, false);
 		const bool masking_enabled = obs_data_get_bool(settings, "masking_group");
-		obs_property_set_visible(masking_dilation, masking_enabled);
+		const bool dynamic_enabled = obs_data_get_bool(settings, "masking_dynamic_expansion");
+
 		obs_property_set_visible(masking_dynamic_expansion, masking_enabled);
+		obs_property_set_visible(masking_dilation, masking_enabled && !dynamic_enabled);
+		if (masking_dynamic_base) obs_property_set_visible(masking_dynamic_base, masking_enabled && dynamic_enabled);
+		if (masking_dynamic_ratio) obs_property_set_visible(masking_dynamic_ratio, masking_enabled && dynamic_enabled);
 
 		if (masking_type_value == "solid_color") {
 			obs_property_set_visible(masking_color, masking_enabled);
@@ -222,13 +234,22 @@ obs_properties_t *detect_filter_properties(void *data)
 			obs_property_set_visible(masking_blur_radius, masking_enabled);
 		}
 		return true;
-	});
+	};
+
+	obs_property_set_modified_callback(masking_type, update_masking_visibility);
 
 	// add slider for dilation iterations
 	obs_properties_add_int_slider(masking_group, "masking_dilate_iterations",
 				      obs_module_text("DilationIterations"), 0, 100, 1);
-	obs_properties_add_bool(masking_group, "masking_dynamic_expansion",
-				obs_module_text("MaskingDynamicExpansion"));
+	obs_property_t *masking_dynamic_expansion = obs_properties_add_bool(
+		masking_group, "masking_dynamic_expansion",
+		obs_module_text("MaskingDynamicExpansion"));
+	obs_property_set_modified_callback(masking_dynamic_expansion, update_masking_visibility);
+
+	obs_properties_add_float_slider(masking_group, "masking_dynamic_expansion_base",
+					obs_module_text("MaskingDynamicExpansionBase"), 0.0, 100.0, 1.0);
+	obs_properties_add_float_slider(masking_group, "masking_dynamic_expansion_ratio",
+					obs_module_text("MaskingDynamicExpansionRatio"), 0.0, 2.0, 0.05);
 
 	// add options group for tracking and zoom-follow options
 	obs_properties_t *tracking_group_props = obs_properties_create();
@@ -383,8 +404,14 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_property_list_add_string(model_size, obs_module_text("SmallFast"), "small");
 	obs_property_list_add_string(model_size, obs_module_text("Medium"), "medium");
 	obs_property_list_add_string(model_size, obs_module_text("LargeSlow"), "large");
-	obs_property_list_add_string(model_size, obs_module_text("FaceDetect"),
-				     FACE_DETECT_MODEL_SIZE);
+	obs_property_list_add_string(model_size, obs_module_text("FaceTrackingModel.YuNet"),
+				     FACE_YUNET_MODEL_SIZE);
+	obs_property_list_add_string(model_size, obs_module_text("FaceTrackingModel.YOLOv8n"),
+				     FACE_YOLO_N_MODEL_SIZE);
+	obs_property_list_add_string(model_size, obs_module_text("FaceTrackingModel.YOLOv8s"),
+				     FACE_YOLO_S_MODEL_SIZE);
+	obs_property_list_add_string(model_size, obs_module_text("FaceTrackingModel.SCRFD"),
+				     FACE_SCRFD_MODEL_SIZE);
 	obs_property_list_add_string(model_size, obs_module_text("ExternalModel"),
 				     EXTERNAL_MODEL_SIZE);
 
@@ -401,10 +428,16 @@ obs_properties_t *detect_filter_properties(void *data)
 			struct detect_filter *tf_ = reinterpret_cast<detect_filter *>(data_);
 			std::string model_size_value = obs_data_get_string(settings, "model_size");
 			bool is_external = model_size_value == EXTERNAL_MODEL_SIZE;
+			bool is_face_detect = (model_size_value == FACE_YUNET_MODEL_SIZE ||
+					       model_size_value == FACE_YOLO_N_MODEL_SIZE ||
+					       model_size_value == FACE_YOLO_S_MODEL_SIZE ||
+					       model_size_value == FACE_SCRFD_MODEL_SIZE);
+			
 			obs_property_t *prop = obs_properties_get(props_, "external_model_file");
 			obs_property_set_visible(prop, is_external);
+
 			if (!is_external) {
-				if (model_size_value == FACE_DETECT_MODEL_SIZE) {
+				if (is_face_detect) {
 					// set the class names to COCO classes for face detection model
 					set_class_names_on_object_category(
 						obs_properties_get(props_, "object_category"),
@@ -530,6 +563,8 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_string(settings, "masking_color", "#000000");
 	obs_data_set_default_int(settings, "masking_dilate_iterations", 0);
 	obs_data_set_default_bool(settings, "masking_dynamic_expansion", false);
+	obs_data_set_default_double(settings, "masking_dynamic_expansion_base", 10.0);
+	obs_data_set_default_double(settings, "masking_dynamic_expansion_ratio", 0.2);
 	obs_data_set_default_int(settings, "dilation_iterations", 0);
 	obs_data_set_default_bool(settings, "tracking_group", false);
 	obs_data_set_default_double(settings, "zoom_factor", 0.0);
@@ -571,6 +606,8 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	tf->maskingBlurRadius = (int)obs_data_get_int(settings, "masking_blur_radius");
 	tf->maskingDilateIterations = (int)obs_data_get_int(settings, "masking_dilate_iterations");
 	tf->maskingDynamicExpansion = obs_data_get_bool(settings, "masking_dynamic_expansion");
+	tf->maskingDynamicExpansionBase = (float)obs_data_get_double(settings, "masking_dynamic_expansion_base");
+	tf->maskingDynamicExpansionRatio = (float)obs_data_get_double(settings, "masking_dynamic_expansion_ratio");
 	bool newTrackingEnabled = obs_data_get_bool(settings, "tracking_group");
 	tf->zoomFactor = (float)obs_data_get_double(settings, "zoom_factor");
 	tf->zoomSpeedFactor = (float)obs_data_get_double(settings, "zoom_speed_factor");
@@ -665,9 +702,14 @@ void detect_filter_update(void *data, obs_data_t *settings)
 		} else if (newModelSize == "large") {
 			modelFilepath_rawPtr =
 				obs_module_file("models/edgeyolo_tiny_lrelu_coco_736x1280.onnx");
-		} else if (newModelSize == FACE_DETECT_MODEL_SIZE) {
-			modelFilepath_rawPtr =
-				obs_module_file("models/face_detection_yunet_2023mar.onnx");
+		} else if (newModelSize == FACE_YUNET_MODEL_SIZE) {
+			modelFilepath_rawPtr = obs_module_file("models/face_detection_yunet_2023mar.onnx");
+		} else if (newModelSize == FACE_YOLO_N_MODEL_SIZE) {
+			modelFilepath_rawPtr = obs_module_file("models/yolov8n-face.onnx");
+		} else if (newModelSize == FACE_YOLO_S_MODEL_SIZE) {
+			modelFilepath_rawPtr = obs_module_file("models/yolov8s-face.onnx");
+		} else if (newModelSize == FACE_SCRFD_MODEL_SIZE) {
+			modelFilepath_rawPtr = obs_module_file("models/scrfd_500m_kps.onnx");
 		} else if (newModelSize == EXTERNAL_MODEL_SIZE) {
 			const char *external_model_file =
 				obs_data_get_string(settings, "external_model_file");
@@ -745,7 +787,10 @@ void detect_filter_update(void *data, obs_data_t *settings)
 				tf->onnxruntimemodel.reset();
 				return;
 			}
-		} else if (tf->modelSize == FACE_DETECT_MODEL_SIZE) {
+		} else if (tf->modelSize == FACE_YUNET_MODEL_SIZE ||
+			   tf->modelSize == FACE_YOLO_N_MODEL_SIZE ||
+			   tf->modelSize == FACE_YOLO_S_MODEL_SIZE ||
+			   tf->modelSize == FACE_SCRFD_MODEL_SIZE) {
 			num_classes_ = 1;
 			tf->classNames = yunet::FACE_CLASSES;
 		}
@@ -755,9 +800,20 @@ void detect_filter_update(void *data, obs_data_t *settings)
 			if (tf->onnxruntimemodel) {
 				tf->onnxruntimemodel.reset();
 			}
-			if (tf->modelSize == FACE_DETECT_MODEL_SIZE) {
+			if (tf->modelSize == FACE_YUNET_MODEL_SIZE) {
 				tf->onnxruntimemodel = std::make_unique<yunet::YuNetONNX>(
 					tf->modelFilepath, tf->numThreads, 50, tf->numThreads,
+					tf->useGPU, onnxruntime_device_id_,
+					onnxruntime_use_parallel_, nms_th_, tf->conf_threshold);
+			} else if (tf->modelSize == FACE_YOLO_N_MODEL_SIZE ||
+				   tf->modelSize == FACE_YOLO_S_MODEL_SIZE) {
+				tf->onnxruntimemodel = std::make_unique<YOLOv8FaceONNX>(
+					tf->modelFilepath, tf->numThreads, tf->numThreads,
+					tf->useGPU, onnxruntime_device_id_,
+					onnxruntime_use_parallel_, nms_th_, tf->conf_threshold);
+			} else if (tf->modelSize == FACE_SCRFD_MODEL_SIZE) {
+				tf->onnxruntimemodel = std::make_unique<SCRFDONNX>(
+					tf->modelFilepath, tf->numThreads, tf->numThreads,
 					tf->useGPU, onnxruntime_device_id_,
 					onnxruntime_use_parallel_, nms_th_, tf->conf_threshold);
 			} else {
@@ -1242,12 +1298,14 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 			cv::Mat mask = cv::Mat::zeros(frame.size(), CV_8UC1);
 			for (const Object &obj : objects) {
 				cv::Rect2f rect = obj.rect;
-				if (tf->maskingDilateIterations > 0) {
-					float expansion = (float)tf->maskingDilateIterations;
-					if (tf->maskingDynamicExpansion) {
-						float scale = rect.height / (float)frame.rows;
-						expansion *= scale;
-					}
+				float expansion = 0.0f;
+				if (tf->maskingDynamicExpansion) {
+					expansion = tf->maskingDynamicExpansionBase + (rect.height * tf->maskingDynamicExpansionRatio);
+				} else if (tf->maskingDilateIterations > 0) {
+					expansion = (float)tf->maskingDilateIterations;
+				}
+
+				if (expansion > 0.0f) {
 					rect.x -= expansion;
 					rect.y -= expansion;
 					rect.width += expansion * 2.0f;

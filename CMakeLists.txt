@@ -80,6 +80,8 @@ endif()
 # add the vendor folder to the include path
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE vendor)
 
+include(cmake/FetchFaceModels.cmake)
+
 target_sources(
   ${CMAKE_PROJECT_NAME}
   PRIVATE src/plugin-main.c
@@ -88,6 +90,8 @@ target_sources(
           src/detect-filter-utils.cpp
           src/obs-utils/obs-utils.cpp
           src/ort-model/ONNXRuntimeModel.cpp
+          src/ort-model/YOLOv8FaceONNX.cpp
+          src/ort-model/SCRFDONNX.cpp
           src/edgeyolo/edgeyolo_onnxruntime.cpp
           src/sort/Sort.cpp
           src/yunet/YuNet.cpp
