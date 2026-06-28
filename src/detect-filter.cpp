@@ -1265,8 +1265,9 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 				for (Object &obj : all_objects) {
 					if (tf->personCategory != -1 && obj.label != tf->personCategory) continue;
 					
+					std::string track_state = obj.customText;
 					if (obj.rect.area() < minPersonAreaPixels) {
-						obj.customText = "Too Small for Face Check";
+						obj.customText = "[" + track_state + "] Too Small for Face Check";
 					} else {
 						float sim = 0.0f;
 						bool has_sim = false;
@@ -1281,14 +1282,14 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 							char buf[64];
 							snprintf(buf, sizeof(buf), "Sim: %.2f", sim);
 							if (obj.isExempt) {
-								obj.customText = std::string("Exempted / ") + buf;
+								obj.customText = "[" + track_state + "] Exempted / " + buf;
 							} else if (sim < tf->faceMatchThreshold) {
-								obj.customText = std::string("Not Me / ") + buf;
+								obj.customText = "[" + track_state + "] Not Me / " + buf;
 							} else {
-								obj.customText = std::string("Checking / ") + buf;
+								obj.customText = "[" + track_state + "] Checking / " + buf;
 							}
 						} else {
-							obj.customText = "Checking Face...";
+							obj.customText = "[" + track_state + "] Checking Face...";
 						}
 					}
 				}

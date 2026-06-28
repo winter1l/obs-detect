@@ -130,6 +130,7 @@ std::vector<Object> Sort::update(const std::vector<Object> &detections)
 				predict(trackedObjects[i].kf); // update internal KF state but keep rect stationary
 			}
 			trackedObjects[i].unseenFrames++;
+			trackedObjects[i].customText = "Unseen (" + std::to_string(trackedObjects[i].unseenFrames) + ")";
 
 			bool can_predict = trackedObjects[i].lastVisibleRects.size() > 1;
 			// Remove lost tracks
@@ -153,6 +154,7 @@ std::vector<Object> Sort::update(const std::vector<Object> &detections)
 			trackedObjects.back().id = nextTrackID++;
 			trackedObjects.back().unseenFrames = 0;
 			trackedObjects.back().hitFrames = 1;
+			trackedObjects.back().customText = "New (1)";
 			trackedObjects.back().lastVisibleRects.push_back(detection.rect);
 		}
 		return trackedObjects;
@@ -225,6 +227,11 @@ std::vector<Object> Sort::update(const std::vector<Object> &detections)
 						trackedObjects[i].hitFrames = std::max(trackedObjects[i].hitFrames, this->minHitFrames);
 					}
 				}
+				if (trackedObjects[i].hitFrames > 5) {
+					trackedObjects[i].customText = "Stable";
+				} else {
+					trackedObjects[i].customText = "New (" + std::to_string(trackedObjects[i].hitFrames) + ")";
+				}
 				trackedObjects[i].lastVisibleRects.push_back(trackedObjects[i].rect);
 				if (trackedObjects[i].lastVisibleRects.size() > 3) {
 					trackedObjects[i].lastVisibleRects.pop_front();
@@ -275,6 +282,7 @@ std::vector<Object> Sort::update(const std::vector<Object> &detections)
 				trackedObjects[i].rect = updateKalmanFilter(trackedObjects[i].kf, detections[j].rect);
 				trackedObjects[i].unseenFrames = 0;
 				trackedObjects[i].hitFrames++;
+				trackedObjects[i].customText = "Recovered";
 				
 				trackedObjects[i].lastVisibleRects.push_back(trackedObjects[i].rect);
 				if (trackedObjects[i].lastVisibleRects.size() > 3) {
@@ -304,6 +312,11 @@ std::vector<Object> Sort::update(const std::vector<Object> &detections)
 					trackedObjects.back().hitFrames = this->minHitFrames;
 				}
 			}
+			if (trackedObjects.back().hitFrames > 5) {
+				trackedObjects.back().customText = "Stable";
+			} else {
+				trackedObjects.back().customText = "New (" + std::to_string(trackedObjects.back().hitFrames) + ")";
+			}
 			trackedObjects.back().lastVisibleRects.push_back(detections[j].rect);
 			// resize trackedObjectUsed to match the new size of trackedObjects
 			trackedObjectUsed.resize(trackedObjects.size(), true);
@@ -322,6 +335,7 @@ std::vector<Object> Sort::update(const std::vector<Object> &detections)
 			newTrackedObjects.push_back(trackedObjects[i]);
 			if (!trackedObjectUsed[i]) {
 				newTrackedObjects.back().unseenFrames++;
+				newTrackedObjects.back().customText = "Unseen (" + std::to_string(newTrackedObjects.back().unseenFrames) + ")";
 			}
 		}
 	}
