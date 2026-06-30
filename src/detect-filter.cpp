@@ -12,6 +12,8 @@
 #include <util/dstr.h>
 #include <wchar.h>
 #include <windows.h>
+#include <d3d11.h>
+#include <dxgi1_2.h>
 #endif // _WIN32
 
 #include <opencv2/imgproc.hpp>
@@ -1011,16 +1013,36 @@ void detect_filter_deactivate(void *data)
 static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 {
 	static auto last_loop_time = std::chrono::high_resolution_clock::now();
-	if (imageBGRA.empty() || !tf->onnxruntimemodel) {
+	if (!tf->onnxruntimemodel) {
 		tf->isInferencing = false;
 		return;
 	}
 	tf->frameCount++;
-		auto start_time = std::chrono::high_resolution_clock::now();
+	auto start_time = std::chrono::high_resolution_clock::now();
 
+	std::vector<Object> objects;
+	bool gpu_run_success = false;
+	cv::Rect cropRect(0, 0, 1, 1);
+
+#ifdef _WIN32
+	if (tf->useGpuZeroCopyCurrentFrame && tf->onnxruntimemodel->is_gpu_pipeline_ready()) {
+		try {
+			std::unique_lock<std::mutex> lock(tf->modelMutex);
+			objects = tf->onnxruntimemodel->inference_gpu();
+			gpu_run_success = true;
+		} catch (const std::exception &e) {
+			obs_log(LOG_ERROR, "GPU Zero-Copy Inference failed: %s. Falling back to CPU.", e.what());
+		}
+	}
+#endif
+
+	if (!gpu_run_success) {
+		if (imageBGRA.empty()) {
+			tf->isInferencing = false;
+			return;
+		}
 		cv::Mat inferenceFrame;
-
-		cv::Rect cropRect(0, 0, imageBGRA.cols, imageBGRA.rows);
+		cropRect = cv::Rect(0, 0, imageBGRA.cols, imageBGRA.rows);
 		if (tf->crop_enabled) {
 			cropRect = cv::Rect(tf->crop_left, tf->crop_top,
 					    imageBGRA.cols - tf->crop_left - tf->crop_right,
@@ -1030,25 +1052,24 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 			cv::cvtColor(imageBGRA, inferenceFrame, cv::COLOR_BGRA2BGR);
 		}
 
-	std::vector<Object> objects;
+		try {
+			std::unique_lock<std::mutex> lock(tf->modelMutex);
+			objects = tf->onnxruntimemodel->inference(inferenceFrame);
+		} catch (const Ort::Exception &e) {
+			obs_log(LOG_ERROR, "ONNXRuntime Exception: %s", e.what());
+		} catch (const std::exception &e) {
+			obs_log(LOG_ERROR, "%s", e.what());
+		}
 
-	try {
-		std::unique_lock<std::mutex> lock(tf->modelMutex);
-		objects = tf->onnxruntimemodel->inference(inferenceFrame);
-	} catch (const Ort::Exception &e) {
-		obs_log(LOG_ERROR, "ONNXRuntime Exception: %s", e.what());
-	} catch (const std::exception &e) {
-		obs_log(LOG_ERROR, "%s", e.what());
-	}
-
-	if (tf->crop_enabled) {
-		// translate the detected objects to the original frame
-		for (Object &obj : objects) {
-			obj.rect.x += (float)cropRect.x;
-			obj.rect.y += (float)cropRect.y;
-			for (int n = 0; n < 5; n++) {
-				obj.landmarks[n].x += (float)cropRect.x;
-				obj.landmarks[n].y += (float)cropRect.y;
+		if (tf->crop_enabled) {
+			// translate the detected objects to the original frame
+			for (Object &obj : objects) {
+				obj.rect.x += (float)cropRect.x;
+				obj.rect.y += (float)cropRect.y;
+				for (int n = 0; n < 5; n++) {
+					obj.landmarks[n].x += (float)cropRect.x;
+					obj.landmarks[n].y += (float)cropRect.y;
+				}
 			}
 		}
 	}
@@ -1294,26 +1315,7 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 			draw_objects(overlay, all_objects, tf->classNames);
 		}
 		if (tf->maskingEnabled) {
-			cv::Mat mask = cv::Mat::zeros(frame.size(), CV_8UC1);
-			for (const Object &obj : objects) {
-				cv::Rect2f rect = obj.rect;
-				float expansion = 0.0f;
-				if (tf->maskingDynamicExpansion) {
-					expansion = tf->maskingDynamicExpansionBase + (rect.height * tf->maskingDynamicExpansionRatio);
-				} else if (tf->maskingDilateIterations > 0) {
-					expansion = (float)tf->maskingDilateIterations;
-				}
-
-				if (expansion > 0.0f) {
-					rect.x -= expansion;
-					rect.y -= expansion;
-					rect.width += expansion * 2.0f;
-					rect.height += expansion * 2.0f;
-				}
-				cv::rectangle(mask, rect, cv::Scalar(255), -1);
-			}
-			std::lock_guard<std::mutex> lock(tf->outputLock);
-			mask.copyTo(tf->outputMask);
+			// OpenCV Mask generation has been moved to GPU shaders
 		}
 
 		if (tf->debugMode) {
@@ -1731,8 +1733,15 @@ void detect_filter_video_tick(void *data, float seconds)
 		return;
 	}
 
+	bool use_gpu_zero_copy = false;
+#ifdef _WIN32
+	if (tf->useGPU == "dml" && tf->onnxruntimemodel->is_gpu_pipeline_ready()) {
+		use_gpu_zero_copy = true;
+	}
+#endif
+
 	cv::Mat imageBGRA;
-	{
+	if (!use_gpu_zero_copy) {
 		std::unique_lock<std::mutex> lock(tf->inputBGRALock, std::try_to_lock);
 		if (!lock.owns_lock() || tf->inputBGRA.empty()) {
 			return;
@@ -1740,20 +1749,32 @@ void detect_filter_video_tick(void *data, float seconds)
 		imageBGRA = tf->inputBGRA.clone();
 	}
 
-	if (tf->syncMode) {
-		run_model_inference(tf, imageBGRA);
-	} else {
-		std::unique_lock<std::mutex> lock(tf->inferenceMutex, std::try_to_lock);
-		if (lock.owns_lock() && !tf->isInferencing) {
-			tf->inferenceInputFrame = imageBGRA;
-			tf->inferenceFrameReady = true;
-			tf->inferenceCV.notify_one();
+	if (!use_gpu_zero_copy) {
+		if (tf->syncMode) {
+			tf->useGpuZeroCopyCurrentFrame = false;
+			run_model_inference(tf, imageBGRA);
+		} else {
+			std::unique_lock<std::mutex> lock(tf->inferenceMutex, std::try_to_lock);
+			if (lock.owns_lock() && !tf->isInferencing) {
+				tf->useGpuZeroCopyCurrentFrame = false;
+				tf->inferenceInputFrame = imageBGRA;
+				tf->inferenceFrameReady = true;
+				tf->inferenceCV.notify_one();
+			}
 		}
 	}
 
 	if (tf->trackingEnabled && tf->trackingFilter) {
-		const int width = imageBGRA.cols;
-		const int height = imageBGRA.rows;
+		int width = 0;
+		int height = 0;
+		if (!imageBGRA.empty()) {
+			width = imageBGRA.cols;
+			height = imageBGRA.rows;
+		} else {
+			width = tf->lastTexWidth;
+			height = tf->lastTexHeight;
+		}
+		if (width <= 0 || height <= 0) return;
 
 		std::vector<Object> objects;
 		{
@@ -1871,12 +1892,98 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 		return;
 	}
 
-	uint32_t width, height;
-	if (!getRGBAFromStageSurface(tf, width, height)) {
+	obs_source_t *target = obs_filter_get_target(tf->source);
+	if (!target) {
 		if (tf->source) {
 			obs_source_skip_video_filter(tf->source);
 		}
 		return;
+	}
+	uint32_t width = obs_source_get_base_width(target);
+	uint32_t height = obs_source_get_base_height(target);
+	if (width == 0 || height == 0) {
+		if (tf->source) {
+			obs_source_skip_video_filter(tf->source);
+		}
+		return;
+	}
+
+	gs_texrender_reset(tf->texrender);
+	if (!gs_texrender_begin(tf->texrender, width, height)) {
+		if (tf->source) {
+			obs_source_skip_video_filter(tf->source);
+		}
+		return;
+	}
+	struct vec4 background;
+	vec4_zero(&background);
+	gs_clear(GS_CLEAR_COLOR, &background, 0.0f, 0);
+	gs_ortho(0.0f, static_cast<float>(width), 0.0f, static_cast<float>(height), -100.0f, 100.0f);
+	gs_blend_state_push();
+	gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
+	obs_source_video_render(target);
+	gs_blend_state_pop();
+	gs_texrender_end(tf->texrender);
+
+	gs_texture_t *render_tex = gs_texrender_get_texture(tf->texrender);
+	bool run_gpu = false;
+
+#ifdef _WIN32
+	if (tf->useGPU == "dml" && tf->onnxruntimemodel && render_tex) {
+		if (!tf->onnxruntimemodel->is_gpu_pipeline_initialized()) {
+			ID3D11Texture2D *d3d11Tex = (ID3D11Texture2D*)gs_texture_get_obj(render_tex);
+			if (d3d11Tex) {
+				ID3D11Device *d3d11Device = nullptr;
+				d3d11Tex->GetDevice(&d3d11Device);
+				if (d3d11Device) {
+					tf->onnxruntimemodel->initialize_gpu(d3d11Device, width, height);
+					d3d11Device->Release();
+				}
+			}
+		}
+
+		if (tf->onnxruntimemodel->is_gpu_pipeline_ready()) {
+			if (tf->onnxruntimemodel->copy_d3d11_texture(render_tex)) {
+				run_gpu = true;
+
+				std::unique_lock<std::mutex> lock(tf->inferenceMutex, std::try_to_lock);
+				if (lock.owns_lock() && !tf->isInferencing) {
+					tf->useGpuZeroCopyCurrentFrame = true;
+					tf->inferenceFrameReady = true;
+					tf->inferenceCV.notify_one();
+				}
+			}
+		}
+	}
+#endif
+
+	if (!run_gpu) {
+		if (tf->stagesurface) {
+			uint32_t stagesurf_width = gs_stagesurface_get_width(tf->stagesurface);
+			uint32_t stagesurf_height = gs_stagesurface_get_height(tf->stagesurface);
+			if (stagesurf_width != width || stagesurf_height != height) {
+				gs_stagesurface_destroy(tf->stagesurface);
+				tf->stagesurface = nullptr;
+			}
+		}
+		if (!tf->stagesurface) {
+			tf->stagesurface = gs_stagesurface_create(width, height, GS_BGRA);
+		}
+		gs_stage_texture(tf->stagesurface, render_tex);
+		uint8_t *video_data;
+		uint32_t linesize;
+		if (gs_stagesurface_map(tf->stagesurface, &video_data, &linesize)) {
+			{
+				std::lock_guard<std::mutex> lock(tf->inputBGRALock);
+				tf->inputBGRA = cv::Mat(height, width, CV_8UC4, video_data, linesize);
+			}
+			gs_stagesurface_unmap(tf->stagesurface);
+		} else {
+			if (tf->source) {
+				obs_source_skip_video_filter(tf->source);
+			}
+			return;
+		}
 	}
 
 	// if preview, masking, debug stats, or debug mode is enabled, render the image
@@ -1900,35 +2007,68 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 				return;
 			}
 			outputBGRA = tf->outputPreviewBGRA.clone();
-			outputMask = tf->outputMask.clone();
 		}
 
 		gs_texture_t *tex = gs_texrender_get_texture(tf->texrender);
 		bool destroy_tex = false;
-		
 		std::string technique_name = "Draw";
 		gs_eparam_t *imageParam = gs_effect_get_param_by_name(tf->maskingEffect, "image");
-		gs_eparam_t *maskParam =
-			gs_effect_get_param_by_name(tf->maskingEffect, "focalmask");
 		gs_eparam_t *maskColorParam =
 			gs_effect_get_param_by_name(tf->maskingEffect, "color");
 
 		if (tf->maskingEnabled) {
-			if (!tf->renderMaskTexture || tf->lastTexWidth != width || tf->lastTexHeight != height) {
-				if (tf->renderMaskTexture) gs_texture_destroy(tf->renderMaskTexture);
-				tf->renderMaskTexture = gs_texture_create(width, height, GS_R8, 1,
-								(const uint8_t **)&outputMask.data, GS_DYNAMIC);
-			} else {
-				gs_texture_set_image(tf->renderMaskTexture, outputMask.data, width, false);
+			// Convert objects to mask rects
+			std::vector<Object> current_objects;
+			{
+				std::lock_guard<std::mutex> lock(tf->outputLock);
+				current_objects = tf->latestObjects;
 			}
-			gs_effect_set_texture(maskParam, tf->renderMaskTexture);
+
+			vec4 mask_rects[64];
+			memset(mask_rects, 0, sizeof(vec4) * 64);
+			int num_mask_rects = 0;
+			for (const Object &obj : current_objects) {
+				if (num_mask_rects >= 64) break;
+				cv::Rect2f rect = obj.rect;
+				float expansion = 0.0f;
+				if (tf->maskingDynamicExpansion) {
+					expansion = tf->maskingDynamicExpansionBase + (rect.height * tf->maskingDynamicExpansionRatio);
+				} else if (tf->maskingDilateIterations > 0) {
+					expansion = (float)tf->maskingDilateIterations;
+				}
+				if (expansion > 0.0f) {
+					rect.x -= expansion;
+					rect.y -= expansion;
+					rect.width += expansion * 2.0f;
+					rect.height += expansion * 2.0f;
+				}
+				vec4_set(&mask_rects[num_mask_rects], 
+					rect.x / (float)width, 
+					rect.y / (float)height, 
+					rect.width / (float)width, 
+					rect.height / (float)height);
+				num_mask_rects++;
+			}
+
+			auto apply_masks_to_effect = [&](gs_effect_t* effect) {
+				if (!effect) return;
+				gs_eparam_t *rectsParam = gs_effect_get_param_by_name(effect, "mask_rects");
+				gs_eparam_t *numRectsParam = gs_effect_get_param_by_name(effect, "num_mask_rects");
+				if (rectsParam) gs_effect_set_val(rectsParam, mask_rects, sizeof(vec4) * 64);
+				if (numRectsParam) gs_effect_set_int(numRectsParam, num_mask_rects);
+			};
+
+			apply_masks_to_effect(tf->maskingEffect);
+			apply_masks_to_effect(tf->kawaseBlurEffect);
+			apply_masks_to_effect(tf->pixelateEffect);
+
 			if (tf->maskingType == "output_mask") {
 				technique_name = "DrawMask";
 			} else if (tf->maskingType == "blur") {
-				tex = blur_image(tf, width, height, tf->renderMaskTexture);
+				tex = blur_image(tf, width, height, nullptr); // alphaTexture is no longer needed
 				destroy_tex = true; // blur_image creates a new texture
 			} else if (tf->maskingType == "pixelate") {
-				tex = pixelate_image(tf, width, height, tf->renderMaskTexture,
+				tex = pixelate_image(tf, width, height, nullptr,
 						     (float)tf->maskingBlurRadius);
 				destroy_tex = true;
 			} else if (tf->maskingType == "transparent") {

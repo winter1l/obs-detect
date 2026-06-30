@@ -97,3 +97,14 @@ target_sources(
           src/sface/SFace.cpp)
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
+
+if(WIN32)
+  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE d3d11.lib d3dcompiler.lib)
+endif()
+
+
+if(WIN32)
+  add_executable(gpu_test_harness tests/verify_gpu_harness.cpp)
+  target_link_libraries(gpu_test_harness PRIVATE d3d11 d3d12 dxgi d3dcompiler)
+endif()
+

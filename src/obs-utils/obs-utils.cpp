@@ -80,7 +80,6 @@ gs_texture_t *blur_image(struct filter_data *tf, uint32_t width, uint32_t height
 	gs_eparam_t *image = gs_effect_get_param_by_name(tf->kawaseBlurEffect, "image");
 	gs_eparam_t *xOffset = gs_effect_get_param_by_name(tf->kawaseBlurEffect, "xOffset");
 	gs_eparam_t *yOffset = gs_effect_get_param_by_name(tf->kawaseBlurEffect, "yOffset");
-	gs_eparam_t *mask = gs_effect_get_param_by_name(tf->kawaseBlurEffect, "focalmask");
 
 	for (int i = 0; i < (int)tf->maskingBlurRadius; i++) {
 		gs_texrender_reset(tf->texrender);
@@ -90,9 +89,7 @@ gs_texture_t *blur_image(struct filter_data *tf, uint32_t width, uint32_t height
 		}
 
 		gs_effect_set_texture(image, blurredTexture);
-		if (alphaTexture != nullptr) {
-			gs_effect_set_texture(mask, alphaTexture);
-		}
+
 		gs_effect_set_float(xOffset, ((float)i + 0.5f) / (float)width);
 		gs_effect_set_float(yOffset, ((float)i + 0.5f) / (float)height);
 
@@ -104,8 +101,7 @@ gs_texture_t *blur_image(struct filter_data *tf, uint32_t width, uint32_t height
 		gs_blend_state_push();
 		gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
 
-		while (gs_effect_loop(tf->kawaseBlurEffect,
-				      (alphaTexture == nullptr) ? "Draw" : "DrawMaskAware")) {
+		while (gs_effect_loop(tf->kawaseBlurEffect, "DrawMaskAware")) {
 			gs_draw_sprite(blurredTexture, 0, width, height);
 		}
 		gs_blend_state_pop();
@@ -125,7 +121,6 @@ gs_texture_t *pixelate_image(struct filter_data *tf, uint32_t width, uint32_t he
 		return blurredTexture;
 	}
 	gs_eparam_t *image = gs_effect_get_param_by_name(tf->pixelateEffect, "image");
-	gs_eparam_t *mask = gs_effect_get_param_by_name(tf->pixelateEffect, "focalmask");
 	gs_eparam_t *pixel_size = gs_effect_get_param_by_name(tf->pixelateEffect, "pixel_size");
 	gs_eparam_t *tex_size = gs_effect_get_param_by_name(tf->pixelateEffect, "tex_size");
 
@@ -136,9 +131,7 @@ gs_texture_t *pixelate_image(struct filter_data *tf, uint32_t width, uint32_t he
 	}
 
 	gs_effect_set_texture(image, blurredTexture);
-	if (alphaTexture != nullptr) {
-		gs_effect_set_texture(mask, alphaTexture);
-	}
+
 	gs_effect_set_float(pixel_size, pixelateRadius);
 	vec2 texsize_vec;
 	vec2_set(&texsize_vec, (float)width, (float)height);

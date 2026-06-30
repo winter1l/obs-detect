@@ -1,7 +1,8 @@
 uniform float4x4 ViewProj;
 uniform texture2d image;
-uniform texture2d focalmask;
 
+uniform float4 mask_rects[64];
+uniform int num_mask_rects;
 uniform float pixel_size; // Size of the pixelation
 uniform float2 tex_size; // Size of the texture in pixels
 
@@ -29,9 +30,21 @@ VertDataOut VSDefault(VertDataOut v_in)
 	return vert_out;
 }
 
+bool IsInMask(float2 uv)
+{
+	for (int i = 0; i < 64; ++i) {
+		if (i >= num_mask_rects) break;
+		float4 r = mask_rects[i];
+		if (uv.x >= r.x && uv.x <= r.x + r.z && uv.y >= r.y && uv.y <= r.y + r.w) {
+			return true;
+		}
+	}
+	return false;
+}
+
 float4 PSPixelate(VertDataOut v_in) : TARGET
 {
-    if (focalmask.Sample(textureSampler, v_in.uv).r == 0) {
+    if (!IsInMask(v_in.uv)) {
 		// No mask - return the original image value without any blur
 		return image.Sample(textureSampler, v_in.uv);
 	}

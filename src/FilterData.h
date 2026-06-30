@@ -100,6 +100,7 @@ struct filter_data {
 
 	bool syncMode;
 
+	bool useGpuZeroCopyCurrentFrame = false;
 	cv::Mat inputBGRA;
 	cv::Mat outputPreviewBGRA;
 	cv::Mat outputMask;

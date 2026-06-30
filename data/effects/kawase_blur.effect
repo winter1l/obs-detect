@@ -1,9 +1,11 @@
 uniform float4x4 ViewProj;
 uniform texture2d image;
-uniform texture2d focalmask;
 
 uniform float xOffset;
 uniform float yOffset;
+
+uniform float4 mask_rects[64];
+uniform int num_mask_rects;
 
 sampler_state textureSampler {
 	Filter    = Linear;
@@ -29,6 +31,18 @@ VertDataOut VSDefault(VertDataOut v_in)
 	return vert_out;
 }
 
+float GetMaskVal(float2 uv)
+{
+	for (int i = 0; i < 64; ++i) {
+		if (i >= num_mask_rects) break;
+		float4 r = mask_rects[i];
+		if (uv.x >= r.x && uv.x <= r.x + r.z && uv.y >= r.y && uv.y <= r.y + r.w) {
+			return 1.0;
+		}
+	}
+	return 0.0;
+}
+
 /**
  * Standard Kawase blur
  */
@@ -51,23 +65,23 @@ float4 PSKawaseBlur(VertDataOut v_in) : TARGET
  */
 float4 PSKawaseBlurMaskAware(VertDataOut v_in) : TARGET
 {
-	if (focalmask.Sample(textureSampler, v_in.uv).r == 0) {
+	if (GetMaskVal(v_in.uv) == 0.0) {
 		// No mask - return the original image value without any blur
 		return image.Sample(textureSampler, v_in.uv);
 	}
 
 	// Calculate the blur value from neighboring pixels
 
-	float alphaValue1 = focalmask.Sample(textureSampler, v_in.uv + float2( xOffset,  yOffset)).r;
+	float alphaValue1 = GetMaskVal(v_in.uv + float2( xOffset,  yOffset));
 	float4 sum = image.Sample(textureSampler, v_in.uv + float2( xOffset,  yOffset)) * alphaValue1;
 
-	float alphaValue2 = focalmask.Sample(textureSampler, v_in.uv + float2(-xOffset,  yOffset)).r;
+	float alphaValue2 = GetMaskVal(v_in.uv + float2(-xOffset,  yOffset));
 	sum += image.Sample(textureSampler, v_in.uv + float2(-xOffset,  yOffset)) * alphaValue2;
 
-	float alphaValue3 = focalmask.Sample(textureSampler, v_in.uv + float2( xOffset, -yOffset)).r;
+	float alphaValue3 = GetMaskVal(v_in.uv + float2( xOffset, -yOffset));
 	sum += image.Sample(textureSampler, v_in.uv + float2( xOffset, -yOffset)) * alphaValue3;
 
-	float alphaValue4 = focalmask.Sample(textureSampler, v_in.uv + float2(-xOffset, -yOffset)).r;
+	float alphaValue4 = GetMaskVal(v_in.uv + float2(-xOffset, -yOffset));
 	sum += image.Sample(textureSampler, v_in.uv + float2(-xOffset, -yOffset)) * alphaValue4;
 
     float pixelCounter = alphaValue1 + alphaValue2 + alphaValue3 + alphaValue4;

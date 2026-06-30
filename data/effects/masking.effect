@@ -1,7 +1,9 @@
 uniform float4x4 ViewProj;
 uniform texture2d image;
-uniform texture2d focalmask;
 uniform float4 color = {1.0, 1.0, 1.0, 1.0};
+
+uniform float4 mask_rects[64];
+uniform int num_mask_rects;
 
 sampler_state textureSampler {
 	Filter    = Linear;
@@ -27,10 +29,22 @@ VertDataOut VSDefault(VertDataOut v_in)
 	return vert_out;
 }
 
+bool IsInMask(float2 uv)
+{
+	for (int i = 0; i < 64; ++i) {
+		if (i >= num_mask_rects) break;
+		float4 r = mask_rects[i];
+		if (uv.x >= r.x && uv.x <= r.x + r.z && uv.y >= r.y && uv.y <= r.y + r.w) {
+			return true;
+		}
+	}
+	return false;
+}
+
 /* where the mask is 1 draw a solid color */
 float4 PSSolid(VertDataOut v_in) : TARGET
 {
-	if (focalmask.Sample(textureSampler, v_in.uv).r != 0) {
+	if (IsInMask(v_in.uv)) {
 		return color.bgra;
     }
     return image.Sample(textureSampler, v_in.uv);
@@ -39,7 +53,7 @@ float4 PSSolid(VertDataOut v_in) : TARGET
 /* draw just the mask */
 float4 PSMask(VertDataOut v_in) : TARGET
 {
-	if (focalmask.Sample(textureSampler, v_in.uv).r != 0) {
+	if (IsInMask(v_in.uv)) {
 		return float4(1,1,1,1);
     }
     return float4(0,0,0,1);
