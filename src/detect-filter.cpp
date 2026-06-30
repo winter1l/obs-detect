@@ -168,18 +168,24 @@ obs_properties_t *detect_filter_properties(void *data)
 		obs_property_t *masking_color = obs_properties_get(props_, "masking_color");
 		obs_property_t *masking_blur_radius =
 			obs_properties_get(props_, "masking_blur_radius");
+		obs_property_t *masking_feather =
+			obs_properties_get(props_, "masking_feather");
 		obs_property_t *masking_dilation =
 			obs_properties_get(props_, "dilation_iterations");
 
 		obs_property_set_visible(prop, enabled);
 		obs_property_set_visible(masking_color, false);
 		obs_property_set_visible(masking_blur_radius, false);
+		obs_property_set_visible(masking_feather, false);
 		obs_property_set_visible(masking_dilation, enabled);
 		std::string masking_type_value = obs_data_get_string(settings, "masking_type");
 		if (masking_type_value == "solid_color") {
 			obs_property_set_visible(masking_color, enabled);
 		} else if (masking_type_value == "blur" || masking_type_value == "pixelate") {
 			obs_property_set_visible(masking_blur_radius, enabled);
+		}
+		if (masking_type_value != "none") {
+			obs_property_set_visible(masking_feather, enabled);
 		}
 		return true;
 	});
@@ -202,6 +208,10 @@ obs_properties_t *detect_filter_properties(void *data)
 	// add slider for blur radius
 	obs_properties_add_int_slider(masking_group, "masking_blur_radius",
 				      obs_module_text("MaskingBlurRadius"), 1, 30, 1);
+					  
+	// add slider for mask feather
+	obs_properties_add_int_slider(masking_group, "masking_feather",
+				      obs_module_text("MaskingFeather"), 0, 200, 1);
 
 	// add callback to show/hide blur radius and color picker
 	auto update_masking_visibility = [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
@@ -209,6 +219,8 @@ obs_properties_t *detect_filter_properties(void *data)
 		obs_property_t *masking_color = obs_properties_get(props_, "masking_color");
 		obs_property_t *masking_blur_radius =
 			obs_properties_get(props_, "masking_blur_radius");
+		obs_property_t *masking_feather =
+			obs_properties_get(props_, "masking_feather");
 		obs_property_t *masking_dilation =
 			obs_properties_get(props_, "masking_dilate_iterations");
 		obs_property_t *masking_dynamic_expansion =
@@ -220,6 +232,7 @@ obs_properties_t *detect_filter_properties(void *data)
 
 		obs_property_set_visible(masking_color, false);
 		obs_property_set_visible(masking_blur_radius, false);
+		obs_property_set_visible(masking_feather, false);
 		const bool masking_enabled = obs_data_get_bool(settings, "masking_group");
 		const bool dynamic_enabled = obs_data_get_bool(settings, "masking_dynamic_expansion");
 
@@ -232,6 +245,9 @@ obs_properties_t *detect_filter_properties(void *data)
 			obs_property_set_visible(masking_color, masking_enabled);
 		} else if (masking_type_value == "blur" || masking_type_value == "pixelate") {
 			obs_property_set_visible(masking_blur_radius, masking_enabled);
+		}
+		if (masking_type_value != "none") {
+			obs_property_set_visible(masking_feather, masking_enabled);
 		}
 		return true;
 	};
@@ -501,6 +517,7 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_add_bool(debug_group_props, "show_yunet_detections", obs_module_text("ShowYuNetDetections"));
 	
 	obs_property_t *enable_face_stats_log = obs_properties_add_bool(debug_group_props, "enable_face_stats_log", obs_module_text("SaveFaceStatsToCSV"));
+	obs_properties_add_bool(debug_group_props, "enable_similarity_log", obs_module_text("EnableSimilarityLog"));
 	obs_properties_add_path(debug_group_props, "face_stats_log_path", obs_module_text("SaveFaceStatsCSVPath"), OBS_PATH_FILE_SAVE, "CSV file (*.csv);;All files (*.*)", nullptr);
 	obs_properties_add_path(debug_group_props, "save_detections_path", obs_module_text("SaveDetectionsPath"), OBS_PATH_FILE_SAVE, "JSON file (*.json);;All files (*.*)", nullptr);
 
@@ -541,6 +558,7 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "max_exempt_persons", 1);
 	obs_data_set_default_bool(settings, "enable_face_stats", false);
 	obs_data_set_default_bool(settings, "enable_face_stats_log", false);
+	obs_data_set_default_bool(settings, "enable_similarity_log", false);
 	obs_data_set_default_bool(settings, "show_yunet_detections", false);
 	obs_data_set_default_string(settings, "face_stats_log_path", "");
 	obs_data_set_default_int(settings, "person_category", 0);
@@ -560,6 +578,7 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "masking_group", false);
 	obs_data_set_default_string(settings, "masking_type", "none");
 	obs_data_set_default_string(settings, "masking_color", "#000000");
+	obs_data_set_default_int(settings, "masking_feather", 0);
 	obs_data_set_default_int(settings, "masking_dilate_iterations", 0);
 	obs_data_set_default_bool(settings, "masking_dynamic_expansion", false);
 	obs_data_set_default_double(settings, "masking_dynamic_expansion_base", 10.0);
@@ -605,6 +624,7 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	tf->maskingType = obs_data_get_string(settings, "masking_type");
 	tf->maskingColor = (int)obs_data_get_int(settings, "masking_color");
 	tf->maskingBlurRadius = (int)obs_data_get_int(settings, "masking_blur_radius");
+	tf->maskingFeather = (int)obs_data_get_int(settings, "masking_feather");
 	tf->maskingDilateIterations = (int)obs_data_get_int(settings, "masking_dilate_iterations");
 	tf->maskingDynamicExpansion = obs_data_get_bool(settings, "masking_dynamic_expansion");
 	tf->maskingDynamicExpansionBase = (float)obs_data_get_double(settings, "masking_dynamic_expansion_base");
@@ -630,6 +650,7 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	tf->minHitFrames = (int)obs_data_get_int(settings, "min_hit_frames");
 	tf->enableFaceStats = obs_data_get_bool(settings, "enable_face_stats");
 	tf->enableFaceStatsLog = obs_data_get_bool(settings, "enable_face_stats_log");
+	tf->enableSimilarityLog = obs_data_get_bool(settings, "enable_similarity_log");
 	tf->faceStatsLogPath = obs_data_get_string(settings, "face_stats_log_path");
 	tf->showYuNetDetections = obs_data_get_bool(settings, "show_yunet_detections");
 
@@ -1397,6 +1418,11 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 				cv::Scalar barColor = (i >= (int)(tf->faceMatchThreshold * 10.0f)) ? cv::Scalar(0,200,0,255) : cv::Scalar(0,0,200,255);
 				cv::rectangle(overlay, barRect, barColor, -1);
 				
+				if (hist[i] > 0) {
+					snprintf(txt, sizeof(txt), "%d", hist[i]);
+					cv::putText(overlay, txt, cv::Point(histX + i*barW + 2, histY - barHeight - 2), cv::FONT_HERSHEY_SIMPLEX, 0.3, cv::Scalar(255,255,255,255), 1);
+				}
+				
 				snprintf(txt, sizeof(txt), ".%d", i);
 				cv::putText(overlay, txt, cv::Point(histX + i*barW + 2, histY + 12), cv::FONT_HERSHEY_SIMPLEX, 0.3, cv::Scalar(200,200,200,255), 1);
 			}
@@ -1506,6 +1532,9 @@ void detect_filter_destroy(void *data)
 		}
 		if (tf->renderMaskTexture) {
 			gs_texture_destroy(tf->renderMaskTexture);
+		}
+		if (tf->baseTexture) {
+			gs_texture_destroy(tf->baseTexture);
 		}
 		gs_effect_destroy(tf->kawaseBlurEffect);
 		gs_effect_destroy(tf->maskingEffect);
@@ -1669,7 +1698,10 @@ static void face_inference_thread_loop(struct detect_filter *tf)
 						float sim = sface::SFaceONNX::match(feat, refFeat);
 						if (sim > max_sim) max_sim = sim;
 					}
-					obs_log(LOG_INFO, "Face matched for obj %llu: similarity %.3f (threshold %.3f)", (unsigned long long)obj.id, max_sim, tf->faceMatchThreshold);
+
+					if (tf->enableSimilarityLog) {
+						obs_log(LOG_INFO, "Face matched for obj %llu: similarity %.3f (threshold %.3f)", (unsigned long long)obj.id, max_sim, tf->faceMatchThreshold);
+					}
 					
 					{
 						std::lock_guard<std::mutex> lock(tf->outputLock);
@@ -2054,13 +2086,29 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 				if (!effect) return;
 				gs_eparam_t *rectsParam = gs_effect_get_param_by_name(effect, "mask_rects");
 				gs_eparam_t *numRectsParam = gs_effect_get_param_by_name(effect, "num_mask_rects");
+				gs_eparam_t *featherParam = gs_effect_get_param_by_name(effect, "feather_pixels");
+				gs_eparam_t *texSizeParam = gs_effect_get_param_by_name(effect, "tex_size");
+
 				if (rectsParam) gs_effect_set_val(rectsParam, mask_rects, sizeof(vec4) * 64);
 				if (numRectsParam) gs_effect_set_int(numRectsParam, num_mask_rects);
+				if (featherParam) gs_effect_set_float(featherParam, (float)tf->maskingFeather);
+				if (texSizeParam) {
+					vec2 texsize_vec;
+					vec2_set(&texsize_vec, (float)width, (float)height);
+					gs_effect_set_vec2(texSizeParam, &texsize_vec);
+				}
 			};
 
 			apply_masks_to_effect(tf->maskingEffect);
 			apply_masks_to_effect(tf->kawaseBlurEffect);
 			apply_masks_to_effect(tf->pixelateEffect);
+
+			// Preserve the original frame for blending
+			if (!tf->baseTexture || gs_texture_get_width(tf->baseTexture) != width || gs_texture_get_height(tf->baseTexture) != height) {
+				if (tf->baseTexture) gs_texture_destroy(tf->baseTexture);
+				tf->baseTexture = gs_texture_create(width, height, GS_BGRA, 1, nullptr, 0);
+			}
+			gs_copy_texture(tf->baseTexture, gs_texrender_get_texture(tf->texrender));
 
 			if (tf->maskingType == "output_mask") {
 				technique_name = "DrawMask";
@@ -2078,16 +2126,26 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 				technique_name = "DrawSolidColor";
 				gs_effect_set_color(maskColorParam, tf->maskingColor);
 			}
-		}
+			
+			gs_eparam_t *baseImageParam = gs_effect_get_param_by_name(tf->maskingEffect, "base_image");
+			if (baseImageParam) gs_effect_set_texture(baseImageParam, tf->baseTexture);
 
-		gs_effect_set_texture(imageParam, tex);
+			gs_effect_set_texture(imageParam, tex);
 
-		while (gs_effect_loop(tf->maskingEffect, technique_name.c_str())) {
-			gs_draw_sprite(tex, 0, 0, 0);
-		}
+			while (gs_effect_loop(tf->maskingEffect, technique_name.c_str())) {
+				gs_draw_sprite(tex, 0, 0, 0);
+			}
 
-		if (destroy_tex) {
-			gs_texture_destroy(tex);
+			if (destroy_tex) {
+				gs_texture_destroy(tex);
+			}
+		} else {
+			gs_effect_t *default_effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+			gs_eparam_t *defaultImageParam = gs_effect_get_param_by_name(default_effect, "image");
+			if (defaultImageParam) gs_effect_set_texture(defaultImageParam, tex);
+			while (gs_effect_loop(default_effect, "Draw")) {
+				gs_draw_sprite(tex, 0, 0, 0);
+			}
 		}
 		
 		if (tf->preview || tf->debugMode || tf->enableFaceStats) {

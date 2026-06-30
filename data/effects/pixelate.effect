@@ -30,27 +30,39 @@ VertDataOut VSDefault(VertDataOut v_in)
 	return vert_out;
 }
 
-bool IsInMask(float2 uv)
+uniform float feather_pixels;
+
+bool IsInBounds(float2 uv)
 {
-	for (int i = 0; i < 64; ++i) {
-		if (i >= num_mask_rects) break;
-		float4 r = mask_rects[i];
-		if (uv.x >= r.x && uv.x <= r.x + r.z && uv.y >= r.y && uv.y <= r.y + r.w) {
-			return true;
-		}
-	}
-	return false;
+    float2 pixel_pos = uv * tex_size;
+    float padding = feather_pixels; 
+
+    for (int i = 0; i < 64; ++i) {
+        if (i >= num_mask_rects) break;
+        float4 r = mask_rects[i];
+        
+        float2 center = float2(r.x + r.z * 0.5, r.y + r.w * 0.5) * tex_size;
+        float2 half_size = float2(r.z * 0.5, r.w * 0.5) * tex_size;
+        
+        float2 d = abs(pixel_pos - center) - half_size;
+        float dist = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
+        
+        if (dist <= padding) {
+            return true;
+        }
+    }
+    return false;
 }
 
 float4 PSPixelate(VertDataOut v_in) : TARGET
 {
-    if (!IsInMask(v_in.uv)) {
-		// No mask - return the original image value without any blur
+    if (!IsInBounds(v_in.uv)) {
 		return image.Sample(textureSampler, v_in.uv);
 	}
 
-    float2 pixelUV = v_in.uv * tex_size; // Convert to pixel coordinates
+    float2 pixelUV = v_in.uv * tex_size;
     float2 pixelatedUV = floor(pixelUV / pixel_size) * pixel_size / tex_size;
+    
     return image.Sample(textureSampler, pixelatedUV);
 }
 

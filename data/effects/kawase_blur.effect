@@ -31,16 +31,30 @@ VertDataOut VSDefault(VertDataOut v_in)
 	return vert_out;
 }
 
-float GetMaskVal(float2 uv)
+uniform float feather_pixels;
+uniform float2 tex_size;
+
+bool IsInBounds(float2 uv)
 {
-	for (int i = 0; i < 64; ++i) {
-		if (i >= num_mask_rects) break;
-		float4 r = mask_rects[i];
-		if (uv.x >= r.x && uv.x <= r.x + r.z && uv.y >= r.y && uv.y <= r.y + r.w) {
-			return 1.0;
-		}
-	}
-	return 0.0;
+    float2 pixel_pos = uv * tex_size;
+    // Add generous padding for blur spread + feather
+    float padding = feather_pixels + 300.0; 
+
+    for (int i = 0; i < 64; ++i) {
+        if (i >= num_mask_rects) break;
+        float4 r = mask_rects[i];
+        
+        float2 center = float2(r.x + r.z * 0.5, r.y + r.w * 0.5) * tex_size;
+        float2 half_size = float2(r.z * 0.5, r.w * 0.5) * tex_size;
+        
+        float2 d = abs(pixel_pos - center) - half_size;
+        float dist = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
+        
+        if (dist <= padding) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /**
@@ -59,35 +73,21 @@ float4 PSKawaseBlur(VertDataOut v_in) : TARGET
 }
 
 /**
- * Mask aware Kawase blur
- * Only uses pixels which are in the masked area for blur. This prevents the "Halo Effect" on
- * the border pixels of the mask.
+ * Mask aware Kawase blur (Optimized)
+ * Only blurs the expanded region around the masks to save GPU time.
  */
 float4 PSKawaseBlurMaskAware(VertDataOut v_in) : TARGET
 {
-	if (GetMaskVal(v_in.uv) == 0.0) {
-		// No mask - return the original image value without any blur
+	if (!IsInBounds(v_in.uv)) {
 		return image.Sample(textureSampler, v_in.uv);
 	}
 
-	// Calculate the blur value from neighboring pixels
-
-	float alphaValue1 = GetMaskVal(v_in.uv + float2( xOffset,  yOffset));
-	float4 sum = image.Sample(textureSampler, v_in.uv + float2( xOffset,  yOffset)) * alphaValue1;
-
-	float alphaValue2 = GetMaskVal(v_in.uv + float2(-xOffset,  yOffset));
-	sum += image.Sample(textureSampler, v_in.uv + float2(-xOffset,  yOffset)) * alphaValue2;
-
-	float alphaValue3 = GetMaskVal(v_in.uv + float2( xOffset, -yOffset));
-	sum += image.Sample(textureSampler, v_in.uv + float2( xOffset, -yOffset)) * alphaValue3;
-
-	float alphaValue4 = GetMaskVal(v_in.uv + float2(-xOffset, -yOffset));
-	sum += image.Sample(textureSampler, v_in.uv + float2(-xOffset, -yOffset)) * alphaValue4;
-
-    float pixelCounter = alphaValue1 + alphaValue2 + alphaValue3 + alphaValue4;
-
-	// Complement the blur pixels with a relative fraction of the center pixel
-	return (sum + image.Sample(textureSampler, v_in.uv) * (4.0 - pixelCounter)) * 0.25;
+	float4 sum = float4(0.0, 0.0, 0.0, 0.0);
+	sum += image.Sample(textureSampler, v_in.uv + float2( xOffset,  yOffset));
+	sum += image.Sample(textureSampler, v_in.uv + float2(-xOffset,  yOffset));
+	sum += image.Sample(textureSampler, v_in.uv + float2( xOffset, -yOffset));
+	sum += image.Sample(textureSampler, v_in.uv + float2(-xOffset, -yOffset));
+	return sum * 0.25;
 }
 
 technique Draw

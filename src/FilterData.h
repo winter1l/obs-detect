@@ -56,6 +56,7 @@ struct filter_data {
 	std::string maskingType;
 	int maskingColor;
 	int maskingBlurRadius;
+	int maskingFeather;
 	int maskingDilateIterations;
 	bool maskingDynamicExpansion;
 	float maskingDynamicExpansionBase;
@@ -73,6 +74,7 @@ struct filter_data {
 	// Face Statistics
 	bool enableFaceStats;
 	bool enableFaceStatsLog;
+	bool enableSimilarityLog;
 	std::string faceStatsLogPath;
 	std::mutex statsMutex;
 	int statTotalChecks = 0;
@@ -97,6 +99,7 @@ struct filter_data {
 	gs_effect_t *kawaseBlurEffect;
 	gs_effect_t *maskingEffect;
 	gs_effect_t *pixelateEffect;
+	gs_texture_t *baseTexture;
 
 	bool syncMode;
 

@@ -29,39 +29,70 @@ VertDataOut VSDefault(VertDataOut v_in)
 	return vert_out;
 }
 
-bool IsInMask(float2 uv)
+uniform float feather_pixels;
+uniform float2 tex_size;
+
+float GetMaskVal(float2 uv)
 {
+	float max_alpha = 0.0;
+	float2 pixel_pos = uv * tex_size;
+
 	for (int i = 0; i < 64; ++i) {
 		if (i >= num_mask_rects) break;
 		float4 r = mask_rects[i];
-		if (uv.x >= r.x && uv.x <= r.x + r.z && uv.y >= r.y && uv.y <= r.y + r.w) {
-			return true;
+		
+		float2 center = float2(r.x + r.z * 0.5, r.y + r.w * 0.5) * tex_size;
+		float2 half_size = float2(r.z * 0.5, r.w * 0.5) * tex_size;
+		
+		// Apply corner radius proportional to feather to prevent angular corners
+		float corner_radius = feather_pixels;
+		float2 adjusted_half_size = max(half_size - corner_radius, 0.0);
+		
+		float2 d = abs(pixel_pos - center) - adjusted_half_size;
+		float dist = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - corner_radius;
+		
+		float alpha = 1.0;
+		if (feather_pixels > 0.0) {
+			// Extend feather strictly outward (dist 0 to feather) 
+			// so the inside is 100% solid, matching the Multiplier: 3 look
+			alpha = smoothstep(feather_pixels, 0.0, dist);
+		} else {
+			alpha = dist <= 0.0 ? 1.0 : 0.0;
 		}
+		max_alpha = max(max_alpha, alpha);
 	}
-	return false;
+	return max_alpha;
 }
 
-/* where the mask is 1 draw a solid color */
+uniform texture2d base_image;
+
+/* where the mask is > 0 draw a blended solid color */
 float4 PSSolid(VertDataOut v_in) : TARGET
 {
-	if (IsInMask(v_in.uv)) {
-		return color.bgra;
+    float a = GetMaskVal(v_in.uv);
+	if (a > 0.0) {
+        float4 bg = base_image.Sample(textureSampler, v_in.uv);
+		return lerp(bg, color.bgra, a);
     }
-    return image.Sample(textureSampler, v_in.uv);
+    return base_image.Sample(textureSampler, v_in.uv);
 }
 
-/* draw just the mask */
+/* draw just the mask (grayscale alpha) */
 float4 PSMask(VertDataOut v_in) : TARGET
 {
-	if (IsInMask(v_in.uv)) {
-		return float4(1,1,1,1);
-    }
-    return float4(0,0,0,1);
+    float a = GetMaskVal(v_in.uv);
+	return float4(a, a, a, 1.0);
 }
 
 float4 PSDefault(VertDataOut v_in) : TARGET
 {
-    return image.Sample(textureSampler, v_in.uv);
+    float a = GetMaskVal(v_in.uv);
+    if (a == 0.0) {
+        return base_image.Sample(textureSampler, v_in.uv);
+    }
+    float4 originalColor = base_image.Sample(textureSampler, v_in.uv);
+    float4 effectColor = image.Sample(textureSampler, v_in.uv);
+    return lerp(originalColor, effectColor, a);
 }
 
 technique DrawSolidColor
