@@ -886,70 +886,73 @@ void detect_filter_update(void *data, obs_data_t *settings)
 			if (sface_raw) bfree(sface_raw);
 
 			// Pre-calculate reference face features
-			if (!tf->referenceFacePath.empty() && tf->yunetModel && tf->sfaceModel) {
-				if (reinitialize || refPathChanged || tf->referenceFaceFeatures.empty()) {
-					tf->referenceFaceFeatures.clear();
+			{
+				std::lock_guard<std::mutex> lock(tf->faceInferenceMutex);
+				if (!tf->referenceFacePath.empty() && tf->yunetModel && tf->sfaceModel) {
+					if (reinitialize || refPathChanged || tf->referenceFaceFeatures.empty()) {
+						tf->referenceFaceFeatures.clear();
 #ifdef _WIN32
-				int p_len = MultiByteToWideChar(CP_UTF8, 0, tf->referenceFacePath.c_str(), -1, nullptr, 0);
-				std::wstring p_wstr(p_len, L'\0');
-				MultiByteToWideChar(CP_UTF8, 0, tf->referenceFacePath.c_str(), -1, p_wstr.data(), p_len);
-				if (p_len > 0 && p_wstr.back() == L'\0') p_wstr.pop_back();
-				std::filesystem::path refPath(p_wstr);
+						int p_len = MultiByteToWideChar(CP_UTF8, 0, tf->referenceFacePath.c_str(), -1, nullptr, 0);
+						std::wstring p_wstr(p_len, L'\0');
+						MultiByteToWideChar(CP_UTF8, 0, tf->referenceFacePath.c_str(), -1, p_wstr.data(), p_len);
+						if (p_len > 0 && p_wstr.back() == L'\0') p_wstr.pop_back();
+						std::filesystem::path refPath(p_wstr);
 #else
-				std::filesystem::path refPath(tf->referenceFacePath);
+						std::filesystem::path refPath(tf->referenceFacePath);
 #endif
-				std::vector<std::filesystem::path> filesToProcess;
-				try {
-					if (std::filesystem::is_directory(refPath)) {
-						for (const auto& entry : std::filesystem::directory_iterator(refPath)) {
-							if (entry.is_regular_file()) {
-								filesToProcess.push_back(entry.path());
+						std::vector<std::filesystem::path> filesToProcess;
+						try {
+							if (std::filesystem::is_directory(refPath)) {
+								for (const auto& entry : std::filesystem::directory_iterator(refPath)) {
+									if (entry.is_regular_file()) {
+										filesToProcess.push_back(entry.path());
+									}
+								}
+							} else if (std::filesystem::is_regular_file(refPath)) {
+								filesToProcess.push_back(refPath);
+							}
+						} catch (const std::exception& e) {
+							obs_log(LOG_ERROR, "Failed to read reference face path: %s", e.what());
+						}
+						
+						int successCount = 0;
+						for (const auto& filePath : filesToProcess) {
+#ifdef _WIN32
+							FILE* f = _wfopen(filePath.wstring().c_str(), L"rb");
+#else
+							FILE* f = fopen(filePath.string().c_str(), "rb");
+#endif
+							cv::Mat refImg;
+							if (f) {
+								int width, height, channels;
+								unsigned char *data = stbi_load_from_file(f, &width, &height, &channels, 3);
+								fclose(f);
+								if (data) {
+									cv::Mat img(height, width, CV_8UC3, data);
+									cv::cvtColor(img, refImg, cv::COLOR_RGB2BGR);
+									stbi_image_free(data);
+								}
+							}
+							
+							if (!refImg.empty()) {
+								std::vector<Object> faces = tf->yunetModel->inference(refImg);
+								if (!faces.empty()) {
+									std::vector<float> feat = tf->sfaceModel->inference(refImg, faces[0].landmarks);
+									tf->referenceFaceFeatures.push_back(feat);
+									successCount++;
+								}
 							}
 						}
-					} else if (std::filesystem::is_regular_file(refPath)) {
-						filesToProcess.push_back(refPath);
-					}
-				} catch (const std::exception& e) {
-					obs_log(LOG_ERROR, "Failed to read reference face path: %s", e.what());
-				}
-				
-				int successCount = 0;
-				for (const auto& filePath : filesToProcess) {
-#ifdef _WIN32
-					FILE* f = _wfopen(filePath.wstring().c_str(), L"rb");
-#else
-					FILE* f = fopen(filePath.string().c_str(), "rb");
-#endif
-					cv::Mat refImg;
-					if (f) {
-						int width, height, channels;
-						unsigned char *data = stbi_load_from_file(f, &width, &height, &channels, 3);
-						fclose(f);
-						if (data) {
-							cv::Mat img(height, width, CV_8UC3, data);
-							cv::cvtColor(img, refImg, cv::COLOR_RGB2BGR);
-							stbi_image_free(data);
+						
+						if (successCount > 0) {
+							obs_log(LOG_INFO, "Reference faces loaded successfully: %d images", successCount);
+						} else {
+							obs_log(LOG_WARNING, "No valid faces detected in the reference face path: %s", tf->referenceFacePath.c_str());
 						}
 					}
-					
-					if (!refImg.empty()) {
-						std::vector<Object> faces = tf->yunetModel->inference(refImg);
-						if (!faces.empty()) {
-							std::vector<float> feat = tf->sfaceModel->inference(refImg, faces[0].landmarks);
-							tf->referenceFaceFeatures.push_back(feat);
-							successCount++;
-						}
-					}
-				}
-				
-				if (successCount > 0) {
-					obs_log(LOG_INFO, "Reference faces loaded successfully: %d images", successCount);
 				} else {
-					obs_log(LOG_WARNING, "No valid faces detected in the reference face path: %s", tf->referenceFacePath.c_str());
+					tf->referenceFaceFeatures.clear();
 				}
-				}
-			} else {
-				tf->referenceFaceFeatures.clear();
 			}
 		} catch (const std::exception &e) {
 			obs_log(LOG_ERROR, "Failed to load face recognition models: %s", e.what());
@@ -1148,6 +1151,7 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 	std::vector<Object> all_objects; // for preview
 
 	if (tf->enableFaceExclusion && tf->sortTracking && tf->yunetModel && tf->sfaceModel && !tf->referenceFaceFeatures.empty()) {
+		std::lock_guard<std::mutex> faceLock(tf->faceInferenceMutex);
 		std::unordered_set<uint64_t> current_ids;
 		float screenArea = (float)(imageBGRA.cols * imageBGRA.rows);
 		float minPersonAreaPixels = screenArea * (tf->minFaceAreaRatio / 100.0f); // use as min person size to save perf
@@ -1192,7 +1196,6 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 		}
 
 		if (!to_check.empty()) {
-			std::unique_lock<std::mutex> lock(tf->faceInferenceMutex);
 			tf->faceInferenceFrame = imageBGRA.clone();
 			tf->faceInferenceQueue = to_check;
 			tf->faceInferenceCV.notify_one();
@@ -1273,16 +1276,20 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 		}
 		std::string jsonStr = j.dump(4);
 		
-		std::thread([savePath, jsonStr]() {
-			std::ofstream detectionsFile(savePath);
-			if (detectionsFile.is_open()) {
-				detectionsFile << jsonStr;
-				detectionsFile.close();
-			} else {
-				obs_log(LOG_ERROR, "Failed to open file for writing detections: %s",
-					savePath.c_str());
-			}
-		}).detach();
+		{
+			std::lock_guard<std::mutex> lock(tf->ioMutex);
+			tf->ioQueue.push_back([savePath, jsonStr]() {
+				std::ofstream detectionsFile(savePath);
+				if (detectionsFile.is_open()) {
+					detectionsFile << jsonStr;
+					detectionsFile.close();
+				} else {
+					obs_log(LOG_ERROR, "Failed to open file for writing detections: %s",
+						savePath.c_str());
+				}
+			});
+		}
+		tf->ioCV.notify_one();
 	}
 
 	if (tf->preview || tf->maskingEnabled || tf->debugMode) {
@@ -1495,6 +1502,29 @@ void *detect_filter_create(obs_data_t *settings, obs_source_t *source)
 	tf->inferenceFrameReady = false;
 	tf->stopFaceInferenceThread = false;
 
+	tf->stopIOThread = false;
+	tf->ioThread = std::thread([tf]() {
+		while (true) {
+			std::function<void()> task;
+			{
+				std::unique_lock<std::mutex> lock(tf->ioMutex);
+				tf->ioCV.wait(lock, [tf] {
+					return !tf->ioQueue.empty() || tf->stopIOThread;
+				});
+				if (tf->stopIOThread && tf->ioQueue.empty()) {
+					break;
+				}
+				if (!tf->ioQueue.empty()) {
+					task = std::move(tf->ioQueue.front());
+					tf->ioQueue.erase(tf->ioQueue.begin());
+				}
+			}
+			if (task) {
+				task();
+			}
+		}
+	});
+
 	tf->inferenceThread = std::thread(inference_thread_loop, tf);
 	tf->faceInferenceThread = std::thread(face_inference_thread_loop, tf);
 
@@ -1522,6 +1552,12 @@ void detect_filter_destroy(void *data)
 			tf->faceInferenceThread.join();
 		}
 
+		tf->stopIOThread = true;
+		tf->ioCV.notify_all();
+		if (tf->ioThread.joinable()) {
+			tf->ioThread.join();
+		}
+
 		obs_enter_graphics();
 		gs_texrender_destroy(tf->texrender);
 		if (tf->stagesurface) {
@@ -1538,6 +1574,9 @@ void detect_filter_destroy(void *data)
 		}
 		gs_effect_destroy(tf->kawaseBlurEffect);
 		gs_effect_destroy(tf->maskingEffect);
+		if (tf->pixelateEffect) {
+			gs_effect_destroy(tf->pixelateEffect);
+		}
 		obs_leave_graphics();
 		tf->~detect_filter();
 		bfree(tf);
@@ -1559,7 +1598,7 @@ static void inference_thread_loop(struct detect_filter *tf)
 				break;
 			}
 
-			imageBGRA = tf->inferenceInputFrame.clone();
+			imageBGRA = std::move(tf->inferenceInputFrame);
 			tf->inferenceFrameReady = false;
 			tf->isInferencing = true;
 		}
@@ -1694,9 +1733,12 @@ static void face_inference_thread_loop(struct detect_filter *tf)
 					}
 					std::vector<float> feat = local_sface->inference(croppedBGR, faces[0].landmarks);
 					float max_sim = -1.0f;
-					for (const auto& refFeat : tf->referenceFaceFeatures) {
-						float sim = sface::SFaceONNX::match(feat, refFeat);
-						if (sim > max_sim) max_sim = sim;
+					{
+						std::lock_guard<std::mutex> lock(tf->faceInferenceMutex);
+						for (const auto& refFeat : tf->referenceFaceFeatures) {
+							float sim = sface::SFaceONNX::match(feat, refFeat);
+							if (sim > max_sim) max_sim = sim;
+						}
 					}
 
 					if (tf->enableSimilarityLog) {
@@ -1726,28 +1768,36 @@ static void face_inference_thread_loop(struct detect_filter *tf)
 						float sim_val = max_sim;
 						uint64_t oid = obj.id;
 						bool is_me_val = is_me;
-						std::thread([logPath, sim_val, oid, is_me_val]() {
-							std::ofstream f(logPath, std::ios::app);
-							if (f.is_open()) {
-								auto now = std::chrono::system_clock::now();
-								auto in_time_t = std::chrono::system_clock::to_time_t(now);
-								char time_buf[100];
-								std::strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", std::localtime(&in_time_t));
-								f << time_buf << "," << oid << "," << sim_val << "," << (is_me_val ? "IS_ME" : "NOT_ME") << "\n";
-							}
-						}).detach();
+						{
+							std::lock_guard<std::mutex> lock(tf->ioMutex);
+							tf->ioQueue.push_back([logPath, sim_val, oid, is_me_val]() {
+								std::ofstream f(logPath, std::ios::app);
+								if (f.is_open()) {
+									auto now = std::chrono::system_clock::now();
+									auto in_time_t = std::chrono::system_clock::to_time_t(now);
+									char time_buf[100];
+									std::strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", std::localtime(&in_time_t));
+									f << time_buf << "," << oid << "," << sim_val << "," << (is_me_val ? "IS_ME" : "NOT_ME") << "\n";
+								}
+							});
+						}
+						tf->ioCV.notify_one();
 					}
 				} else {
 					// obs_log(LOG_INFO, "No face detected in cropped region for obj %llu", (unsigned long long)obj.id);
 				}
 				
-				if (is_me) {
-					tf->faceStatusCache[obj.id] = filter_data::FaceStatus::IS_ME;
-					tf->faceExemptIds.insert(obj.id);
-				} else {
-					tf->faceStatusCache[obj.id] = filter_data::FaceStatus::NOT_ME;
+				{
+					std::lock_guard<std::mutex> lock(tf->faceInferenceMutex);
+					if (is_me) {
+						tf->faceStatusCache[obj.id] = filter_data::FaceStatus::IS_ME;
+						tf->faceExemptIds.insert(obj.id);
+					} else {
+						tf->faceStatusCache[obj.id] = filter_data::FaceStatus::NOT_ME;
+					}
 				}
 			} else {
+				std::lock_guard<std::mutex> lock(tf->faceInferenceMutex);
 				tf->faceStatusCache[obj.id] = filter_data::FaceStatus::UNKNOWN;
 			}
 		}
@@ -1789,7 +1839,7 @@ void detect_filter_video_tick(void *data, float seconds)
 			std::unique_lock<std::mutex> lock(tf->inferenceMutex, std::try_to_lock);
 			if (lock.owns_lock() && !tf->isInferencing) {
 				tf->useGpuZeroCopyCurrentFrame = false;
-				tf->inferenceInputFrame = imageBGRA;
+				tf->inferenceInputFrame = std::move(imageBGRA);
 				tf->inferenceFrameReady = true;
 				tf->inferenceCV.notify_one();
 			}
@@ -2021,6 +2071,7 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 	// if preview, masking, debug stats, or debug mode is enabled, render the image
 	if (tf->preview || tf->maskingEnabled || tf->debugMode || tf->enableFaceStats) {
 		cv::Mat outputBGRA, outputMask;
+		cv::Mat localOutputBGRA;
 		{
 			// lock the outputLock mutex
 			std::lock_guard<std::mutex> lock(tf->outputLock);
@@ -2038,8 +2089,9 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 				}
 				return;
 			}
-			outputBGRA = tf->outputPreviewBGRA.clone();
+			localOutputBGRA = tf->outputPreviewBGRA;
 		}
+		outputBGRA = localOutputBGRA.clone();
 
 		gs_texture_t *tex = gs_texrender_get_texture(tf->texrender);
 		bool destroy_tex = false;

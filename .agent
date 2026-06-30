@@ -1,21 +1,20 @@
-# Project Progress (.agent)
+# obs-detect Agent Status
 
-## 현재 진행 상황 (2026-06-29)
-- **비동기 오버레이 최적화 완료**:
-  - `인식 박스 미리보기(Preview)`, `디버그 모드`, `얼굴 인식 통계 표시(Face Stats)`를 활성화할 때 전체 FPS가 모델 인퍼런스 프레임레이트로 강제 동기화되던 문제를 해결했습니다.
-  - 이제 원본 영상 프레임(60FPS)은 그대로 유지하고, 투명한 알파 채널을 가진 별도의 오버레이를 생성하여 비동기식으로 덧그려 출력(Overlay Alpha Blending)합니다.
-- **연속 트래킹(SORT) 버그 수정**:
-  - 연속 트래킹을 비활성화했을 때 객체들이 모두 사라져 보이지 않던 문제를 수정했습니다. 원인은 `Object` 구조체 내부의 `unseenFrames` 변수가 제대로 초기화되지 않아(쓰레기 값 발생) 조건문에서 강제로 필터링되었던 것이며, 이를 기본값 `0`으로 명시적 초기화하여 완벽히 수정했습니다.
-- **통계 표시 UI 글자 깨짐 및 투명도 버그 해결**:
-  - 알파 채널이 적용된 오버레이에서 글자와 상자의 색이 어두워지거나 투명해지는 버그를 `cv::Scalar` 255 스케일 매핑 및 텍스트 대비(`c_mean`) 계산식을 원래대로 복원해 해결했습니다. ID 텍스트에도 가독성 향상을 위해 배경 상자를 추가했습니다.
-- **사람 클래스(Person Category) 설정 이동**:
-  - 사람 클래스 설정 단계를 '특정 대상 추적 제외' 그룹의 하위 항목으로 이동 완료했습니다.
-- **얼굴 추적 모델 및 UI 개편 완료**:
-  - `YuNet`, `YOLOv8n-Face`, `YOLOv8s-Face`, `SCRFD` 모델들을 직접 `Model Size` 드롭다운에서 선택할 수 있도록 통합하고 하위 중복 드롭다운을 정리했습니다.
-  - OBS 내장 구버전 ONNX Runtime과의 호환성을 확보하기 위해, 다운로드된 YOLOv8 ONNX 모델의 IR 버전을 자동으로 `7`로 패치하는 빌드 파이프라인(CMake)을 적용했습니다.
-  - YOLOv8-Face 모델 출력 텐서의 두 형태 `[1, 5, 8400]` (Lindevs) 및 `[1, 300, 21]` (Yakhyo)를 모두 지원하도록 가변 디코더를 구축했습니다.
-  - 마스크 동적 확장 방식을 `Base + (얼굴 크기 * Ratio)` 수식으로 조절 가능한 미세 슬라이더(최대 Ratio: 2.0)로 고도화했습니다.
+## 프로젝트 현재 진행 상황
+- **마일스톤**: 렌더링 파이프라인 및 AI 추론부 최적화, 스레드 동기화 위험 제거, GPU 리소스 누수 해결 및 비동기 파일 I/O 스레드 결함 수정 완료 (최종 승인)
+- **현재 상태**: 
+  - 신규 브랜치 `optimization-review` 상에서 모든 최적화 및 버그 수정을 완료했습니다.
+  - `detect_filter_destroy` 내 GPU 리소스 누수 수정 및 `ioThread` 해제 과정이 정상 조치되었습니다.
+  - `referenceFaceFeatures`, `faceStatusCache` 및 `faceExemptIds`에 대한 Data Race 방지를 위해 `faceInferenceMutex`로 락 동기화를 완벽하게 처리하였고 중복 락 데드락 버그를 제거했습니다.
+  - `detect_filter_video_tick` 및 `inference_thread_loop`에서 `std::move`를 활용하여 `cv::Mat` 딥카피 횟수를 축소하였습니다.
+  - `detect_filter_video_render` 내 렌더링 스레드의 락 임계 영역 내에서는 얕은 복사만 수행하고, 딥카피(`clone()`)는 락 밖에서 실행하도록 리팩토링하여 OBS 60FPS 렌더 틱 방어와 레이턴시를 획기적으로 개선하였습니다.
+  - 비동기 파일 I/O 태스크 큐(`ioQueue`)와 단일 백그라운드 스레드(`ioThread`)를 도입해 과도한 std::thread 스폰 및 UAF 취약점을 해결하였으며, 종료 시 `while (true)` 루프와 락 내부 검사로 잔여 작업 유실 없는 정상 종료를 보장합니다.
+  - `verify_gpu_pipeline.py` E2E 테스트(20/20 PASS) 및 CMake Release 빌드 무결성이 모두 독립 검증 에이전트(reviewer_2)를 통해 APPROVE 되었습니다.
+  - **Victory Audit 결과**: Victory Auditor에 의해 3단계 검증이 성공적으로 완료되었으며, 최종 판정 'VICTORY CONFIRMED'를 획득하였습니다. (2026-06-30)
+- **수정 대상 파일**: 없음 (모든 검증 완료 및 승인 획득)
 
-## 브랜치 정보
-- 작업 브랜치: `master` (병합 완료)
-- 대상 메인 브랜치: `master`
+## 프로젝트 안내
+- 본 프로젝트는 OBS용 객체/얼굴 감지 필터 플러그인(C++)입니다.
+- 인퍼런스는 백그라운드 스레드에서 비동기 처리되며, CPU 및 GPU(DirectML) 최적화로 동작합니다.
+- 빌드는 CMake 시스템 기반이며, `cmake --build build --config Release`로 릴리즈 빌드를 수행합니다.
+- 파이썬 스크립트 실행 경로는 `C:\Users\chc01\AppData\Local\Programs\Python\Python311\python.exe`를 사용합니다.

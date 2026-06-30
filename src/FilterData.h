@@ -11,6 +11,10 @@
 #include <chrono>
 #include <vector>
 #include <mutex>
+#include <thread>
+#include <atomic>
+#include <condition_variable>
+#include <functional>
 
 struct DebugFaceBox {
 	cv::Rect2f rect;
@@ -142,6 +146,13 @@ struct filter_data {
 	std::condition_variable faceInferenceCV;
 	std::vector<Object> faceInferenceQueue;
 	cv::Mat faceInferenceFrame;
+
+	// File IO background thread
+	std::thread ioThread;
+	std::atomic<bool> stopIOThread;
+	std::mutex ioMutex;
+	std::condition_variable ioCV;
+	std::vector<std::function<void()>> ioQueue;
 
 	std::unique_ptr<ONNXRuntimeModel> onnxruntimemodel;
 	std::vector<std::string> classNames;
