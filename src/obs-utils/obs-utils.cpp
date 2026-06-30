@@ -69,10 +69,10 @@ bool getRGBAFromStageSurface(filter_data *tf, uint32_t &width, uint32_t &height)
 }
 
 gs_texture_t *blur_image(struct filter_data *tf, uint32_t width, uint32_t height,
-			 gs_texture_t *alphaTexture)
+			 gs_texture_t *alphaTexture, gs_texture_t *sourceTexture)
 {
 	gs_texture_t *blurredTexture = gs_texture_create(width, height, GS_BGRA, 1, nullptr, 0);
-	gs_copy_texture(blurredTexture, gs_texrender_get_texture(tf->texrender));
+	gs_copy_texture(blurredTexture, sourceTexture ? sourceTexture : gs_texrender_get_texture(tf->texrender));
 	if (tf->kawaseBlurEffect == nullptr) {
 		obs_log(LOG_ERROR, "tf->kawaseBlurEffect is null");
 		return blurredTexture;
@@ -112,10 +112,10 @@ gs_texture_t *blur_image(struct filter_data *tf, uint32_t width, uint32_t height
 }
 
 gs_texture_t *pixelate_image(struct filter_data *tf, uint32_t width, uint32_t height,
-			     gs_texture_t *alphaTexture, float pixelateRadius)
+			     gs_texture_t *alphaTexture, float pixelateRadius, gs_texture_t *sourceTexture)
 {
 	gs_texture_t *blurredTexture = gs_texture_create(width, height, GS_BGRA, 1, nullptr, 0);
-	gs_copy_texture(blurredTexture, gs_texrender_get_texture(tf->texrender));
+	gs_copy_texture(blurredTexture, sourceTexture ? sourceTexture : gs_texrender_get_texture(tf->texrender));
 	if (tf->pixelateEffect == nullptr) {
 		obs_log(LOG_ERROR, "tf->pixelateEffect is null");
 		return blurredTexture;

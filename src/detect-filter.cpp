@@ -144,6 +144,7 @@ obs_properties_t *detect_filter_properties(void *data)
 
 	obs_properties_add_bool(props, "preview", obs_module_text("Preview"));
 	obs_properties_add_bool(props, "sync_mode", obs_module_text("SynchronousMode"));
+	obs_properties_add_int_slider(props, "video_delay_frames", obs_module_text("VideoDelayFrames"), 0, 5, 1);
 
 	// add dropdown selection for object category selection: "All", or COCO classes
 	obs_property_t *object_category =
@@ -551,6 +552,7 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "show_unseen_objects", false);
 	obs_data_set_default_bool(settings, "preview", false);
 	obs_data_set_default_bool(settings, "sync_mode", false);
+	obs_data_set_default_int(settings, "video_delay_frames", 0);
 	obs_data_set_default_bool(settings, "debug_mode", false);
 	obs_data_set_default_double(settings, "face_match_threshold", 0.36);
 	obs_data_set_default_double(settings, "min_face_area_ratio", 2.0);
@@ -608,6 +610,7 @@ void detect_filter_update(void *data, obs_data_t *settings)
 
 	tf->preview = obs_data_get_bool(settings, "preview");
 	tf->syncMode = obs_data_get_bool(settings, "sync_mode");
+	tf->videoDelayFrames = (int)obs_data_get_int(settings, "video_delay_frames");
 	tf->debugMode = obs_data_get_bool(settings, "debug_mode");
 	tf->conf_threshold = (float)obs_data_get_double(settings, "threshold");
 	tf->objectCategory = (int)obs_data_get_int(settings, "object_category");
@@ -1560,6 +1563,10 @@ void detect_filter_destroy(void *data)
 
 		obs_enter_graphics();
 		gs_texrender_destroy(tf->texrender);
+		for (auto tex : tf->delayedTextures) gs_texture_destroy(tex);
+		tf->delayedTextures.clear();
+		for (auto tex : tf->texturePool) gs_texture_destroy(tex);
+		tf->texturePool.clear();
 		if (tf->stagesurface) {
 			gs_stagesurface_destroy(tf->stagesurface);
 		}
@@ -2068,6 +2075,42 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 		}
 	}
 
+	// ---- VIDEO DELAY LOGIC ----
+	while ((int)tf->delayedTextures.size() > tf->videoDelayFrames) {
+		gs_texture_t *old_tex = tf->delayedTextures.front();
+		tf->delayedTextures.pop_front();
+		tf->texturePool.push_back(old_tex);
+	}
+
+	gs_texture_t *copy_tex = nullptr;
+	if (tf->videoDelayFrames > 0) {
+		for (auto it = tf->texturePool.begin(); it != tf->texturePool.end(); ++it) {
+			if (gs_texture_get_width(*it) == width && gs_texture_get_height(*it) == height) {
+				copy_tex = *it;
+				tf->texturePool.erase(it);
+				break;
+			}
+		}
+		if (!copy_tex) {
+			copy_tex = gs_texture_create(width, height, GS_BGRA, 1, nullptr, GS_RENDER_TARGET);
+		}
+		if (copy_tex) {
+			gs_copy_texture(copy_tex, render_tex);
+			tf->delayedTextures.push_back(copy_tex);
+		}
+	} else {
+		for (auto tex : tf->delayedTextures) gs_texture_destroy(tex);
+		tf->delayedTextures.clear();
+		for (auto tex : tf->texturePool) gs_texture_destroy(tex);
+		tf->texturePool.clear();
+	}
+
+	gs_texture_t *delayed_tex = render_tex;
+	if (tf->videoDelayFrames > 0 && !tf->delayedTextures.empty()) {
+		delayed_tex = tf->delayedTextures.front();
+	}
+	// ---------------------------
+
 	// if preview, masking, debug stats, or debug mode is enabled, render the image
 	if (tf->preview || tf->maskingEnabled || tf->debugMode || tf->enableFaceStats) {
 		cv::Mat outputBGRA, outputMask;
@@ -2093,7 +2136,7 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 		}
 		outputBGRA = localOutputBGRA.clone();
 
-		gs_texture_t *tex = gs_texrender_get_texture(tf->texrender);
+		gs_texture_t *tex = delayed_tex;
 		bool destroy_tex = false;
 		std::string technique_name = "Draw";
 		gs_eparam_t *imageParam = gs_effect_get_param_by_name(tf->maskingEffect, "image");
@@ -2160,16 +2203,16 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 				if (tf->baseTexture) gs_texture_destroy(tf->baseTexture);
 				tf->baseTexture = gs_texture_create(width, height, GS_BGRA, 1, nullptr, 0);
 			}
-			gs_copy_texture(tf->baseTexture, gs_texrender_get_texture(tf->texrender));
+			gs_copy_texture(tf->baseTexture, delayed_tex);
 
 			if (tf->maskingType == "output_mask") {
 				technique_name = "DrawMask";
 			} else if (tf->maskingType == "blur") {
-				tex = blur_image(tf, width, height, nullptr); // alphaTexture is no longer needed
+				tex = blur_image(tf, width, height, nullptr, delayed_tex); // pass delayed_tex as source
 				destroy_tex = true; // blur_image creates a new texture
 			} else if (tf->maskingType == "pixelate") {
 				tex = pixelate_image(tf, width, height, nullptr,
-						     (float)tf->maskingBlurRadius);
+						     (float)tf->maskingBlurRadius, delayed_tex);
 				destroy_tex = true;
 			} else if (tf->maskingType == "transparent") {
 				technique_name = "DrawSolidColor";
@@ -2222,6 +2265,14 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 		
 		tf->lastTexWidth = width;
 		tf->lastTexHeight = height;
+	} else if (tf->videoDelayFrames > 0) {
+		gs_texture_t *tex = delayed_tex;
+		gs_effect_t *default_effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+		gs_eparam_t *defaultImageParam = gs_effect_get_param_by_name(default_effect, "image");
+		if (defaultImageParam) gs_effect_set_texture(defaultImageParam, tex);
+		while (gs_effect_loop(default_effect, "Draw")) {
+			gs_draw_sprite(tex, 0, 0, 0);
+		}
 	} else {
 		// Just render the original video
 		gs_texture_t *tex = gs_texrender_get_texture(tf->texrender);

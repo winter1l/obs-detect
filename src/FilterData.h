@@ -11,6 +11,7 @@
 #include <chrono>
 #include <vector>
 #include <mutex>
+#include <deque>
 #include <thread>
 #include <atomic>
 #include <condition_variable>
@@ -99,6 +100,10 @@ struct filter_data {
 
 	obs_source_t *source;
 	gs_texrender_t *texrender;
+
+	int videoDelayFrames;
+	std::deque<gs_texture_t*> delayedTextures;
+	std::vector<gs_texture_t*> texturePool;
 	gs_stagesurf_t *stagesurface;
 	gs_effect_t *kawaseBlurEffect;
 	gs_effect_t *maskingEffect;
