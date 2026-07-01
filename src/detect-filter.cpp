@@ -2095,14 +2095,20 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 	}
 
 	// ---- VIDEO DELAY LOGIC ----
-	while ((int)tf->delayedTextures.size() > tf->videoDelayFrames) {
+	tf->currentFrameId++;
+	int totalDelay = tf->videoDelayFrames + tf->lookaheadDelayFrames;
+
+	while ((int)tf->delayedTextures.size() > totalDelay) {
 		gs_texture_t *old_tex = tf->delayedTextures.front();
 		tf->delayedTextures.pop_front();
 		tf->texturePool.push_back(old_tex);
 	}
+	while ((int)tf->delayedFrameIds.size() > totalDelay) {
+		tf->delayedFrameIds.pop_front();
+	}
 
 	gs_texture_t *copy_tex = nullptr;
-	if (tf->videoDelayFrames > 0) {
+	if (totalDelay > 0) {
 		for (auto it = tf->texturePool.begin(); it != tf->texturePool.end(); ++it) {
 			if (gs_texture_get_width(*it) == width && gs_texture_get_height(*it) == height) {
 				copy_tex = *it;
@@ -2116,44 +2122,43 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 		if (copy_tex) {
 			gs_copy_texture(copy_tex, render_tex);
 			tf->delayedTextures.push_back(copy_tex);
+			tf->delayedFrameIds.push_back(tf->currentFrameId);
 		}
 	} else {
 		for (auto tex : tf->delayedTextures) gs_texture_destroy(tex);
 		tf->delayedTextures.clear();
+		tf->delayedFrameIds.clear();
 		for (auto tex : tf->texturePool) gs_texture_destroy(tex);
 		tf->texturePool.clear();
 	}
 
 	gs_texture_t *delayed_tex = render_tex;
-	if (tf->videoDelayFrames > 0 && !tf->delayedTextures.empty()) {
+	uint64_t renderFrameId = tf->currentFrameId;
+	if (totalDelay > 0 && !tf->delayedTextures.empty()) {
 		delayed_tex = tf->delayedTextures.front();
+		renderFrameId = tf->delayedFrameIds.front();
 	}
 	// ---------------------------
 
 	// if preview, masking, debug stats, or debug mode is enabled, render the image
 	if (tf->preview || tf->maskingEnabled || tf->debugMode || tf->enableFaceStats) {
-		cv::Mat outputBGRA, outputMask;
+		cv::Mat outputBGRA;
 		cv::Mat localOutputBGRA;
+		bool skip_preview = false;
 		{
 			// lock the outputLock mutex
 			std::lock_guard<std::mutex> lock(tf->outputLock);
-			if (tf->outputPreviewBGRA.empty()) {
-				obs_log(LOG_ERROR, "Preview image is empty");
-				if (tf->source) {
-					obs_source_skip_video_filter(tf->source);
-				}
-				return;
-			}
-			if ((uint32_t)tf->outputPreviewBGRA.cols != width ||
+			if (tf->outputPreviewBGRA.empty() || 
+			    (uint32_t)tf->outputPreviewBGRA.cols != width ||
 			    (uint32_t)tf->outputPreviewBGRA.rows != height) {
-				if (tf->source) {
-					obs_source_skip_video_filter(tf->source);
-				}
-				return;
+				skip_preview = true;
+			} else {
+				localOutputBGRA = tf->outputPreviewBGRA;
 			}
-			localOutputBGRA = tf->outputPreviewBGRA;
 		}
-		outputBGRA = localOutputBGRA.clone();
+		if (!skip_preview) {
+			outputBGRA = localOutputBGRA.clone();
+		}
 
 		gs_texture_t *tex = delayed_tex;
 		bool destroy_tex = false;
@@ -2262,7 +2267,7 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 			}
 		}
 		
-		if (tf->preview || tf->debugMode || tf->enableFaceStats) {
+		if (!skip_preview && (tf->preview || tf->debugMode || tf->enableFaceStats)) {
 			if (!tf->previewTexture || tf->lastTexWidth != width || tf->lastTexHeight != height) {
 				if (tf->previewTexture) gs_texture_destroy(tf->previewTexture);
 				tf->previewTexture = gs_texture_create(width, height, GS_BGRA, 1,
@@ -2284,7 +2289,7 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 		
 		tf->lastTexWidth = width;
 		tf->lastTexHeight = height;
-	} else if (tf->videoDelayFrames > 0) {
+	} else if (totalDelay > 0) {
 		gs_texture_t *tex = delayed_tex;
 		gs_effect_t *default_effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
 		gs_eparam_t *defaultImageParam = gs_effect_get_param_by_name(default_effect, "image");
