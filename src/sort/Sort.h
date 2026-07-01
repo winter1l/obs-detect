@@ -84,6 +84,20 @@ public:
 	// Get Ghost Recovery Max Unseen Frames
 	size_t getGhostRecoveryMaxUnseen() const { return this->ghostRecoveryMaxUnseen; }
 
+	// Set Kalman Min Noise
+	void setKalmanMinNoise(float minNoise)
+	{
+		this->kalmanMinNoise = minNoise;
+	}
+	float getKalmanMinNoise() const { return this->kalmanMinNoise; }
+
+	// Set Kalman Area Threshold
+	void setKalmanAreaThreshold(float areaThresh)
+	{
+		this->kalmanAreaThreshold = areaThresh;
+	}
+	float getKalmanAreaThreshold() const { return this->kalmanAreaThreshold; }
+
 private:
 	// Private methods for the Kalman filter and other internal workings
 	void initializeKalmanFilter(cv::KalmanFilter &kf, const cv::Rect_<float> &bbox);
@@ -100,6 +114,8 @@ private:
 	float screenArea = 0.0f;
 	float ghostRecoveryMultiplier = 2.0f;
 	size_t ghostRecoveryMaxUnseen = 3;
+	float kalmanMinNoise = 0.3f;
+	float kalmanAreaThreshold = 0.1f;
 };
 
 #endif
