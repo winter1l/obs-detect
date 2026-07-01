@@ -93,6 +93,7 @@ target_sources(
           src/ort-model/YOLOv8FaceONNX.cpp
           src/edgeyolo/edgeyolo_onnxruntime.cpp
           src/sort/Sort.cpp
+          src/sort/StateHistory.cpp
           src/yunet/YuNet.cpp
           src/sface/SFace.cpp)
 

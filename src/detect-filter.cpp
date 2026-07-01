@@ -1041,6 +1041,7 @@ void detect_filter_deactivate(void *data)
 	obs_log(LOG_INFO, "Detect filter deactivated");
 	struct detect_filter *tf = reinterpret_cast<detect_filter *>(data);
 	tf->isDisabled = true;
+	if (tf->stateHistory) tf->stateHistory->clear();
 }
 
 /**                   FILTER CORE                     */
@@ -1156,7 +1157,7 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 	if (tf->sortTracking) {
 		float screenArea = (float)(imageBGRA.cols * imageBGRA.rows);
 		tf->tracker.setScreenArea(screenArea);
-		objects = tf->tracker.update(objects);
+		objects = tf->tracker.update(tf->inferenceFrameId, objects);
 	}
 
 	std::vector<Object> all_objects; // for preview
@@ -1481,6 +1482,9 @@ void *detect_filter_create(obs_data_t *settings, obs_source_t *source)
 	tf->texrender = gs_texrender_create(GS_BGRA, GS_ZS_NONE);
 	tf->lastDetectedObjectId = -1;
 	tf->frameCount = 0;
+	tf->currentFrameId = 0;
+	tf->stateHistory = std::make_shared<StateHistoryManager>();
+	tf->tracker.setStateHistoryManager(tf->stateHistory);
 
 	for (int i = 0; i < MAX_AUDIO_CHANNELS; i++) {
 		circlebuf_init(&tf->audioBuffers[i]);
@@ -1859,9 +1863,10 @@ void detect_filter_video_tick(void *data, float seconds)
 
 	if (!use_gpu_zero_copy) {
 		std::unique_lock<std::mutex> lock(tf->inferenceMutex, std::try_to_lock);
-		if (lock.owns_lock() && !tf->isInferencing) {
+		if (lock.owns_lock() && !tf->isInferencing && !tf->useGpuZeroCopyCurrentFrame) {
 			tf->useGpuZeroCopyCurrentFrame = false;
 			tf->inferenceInputFrame = std::move(imageBGRA);
+			tf->inferenceFrameId = tf->currentFrameId;
 			tf->inferenceFrameReady = true;
 			tf->inferenceCV.notify_one();
 		}

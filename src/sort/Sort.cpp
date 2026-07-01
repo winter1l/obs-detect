@@ -124,7 +124,7 @@ float computeIoU(const cv::Rect_<float> &rect1, const cv::Rect_<float> &rect2)
 }
 
 // Update the tracking with detected objects
-std::vector<Object> Sort::update(const std::vector<Object> &detections)
+std::vector<Object> Sort::update(uint64_t frameId, const std::vector<Object> &detections)
 {
 	if (detections.empty()) {
 		std::vector<Object> newTrackedObjects;
@@ -167,6 +167,21 @@ std::vector<Object> Sort::update(const std::vector<Object> &detections)
 			}
 		}
 		trackedObjects = newTrackedObjects;
+		
+		if (stateHistory) {
+			std::map<int, TrackedObjectState> current_frame_states;
+			for (auto &track : trackedObjects) {
+				TrackedObjectState state;
+				state.id = (int)track.id;
+				state.rect = track.rect;
+				state.is_extrapolated = (track.unseenFrames > 0);
+				state.hit_streak = track.hitFrames;
+				state.is_confirmed = (track.hitFrames >= this->minHitFrames);
+				current_frame_states[(int)track.id] = state;
+			}
+			stateHistory->push_frame_state(frameId, current_frame_states);
+		}
+
 		return trackedObjects;
 	}
 
@@ -183,6 +198,21 @@ std::vector<Object> Sort::update(const std::vector<Object> &detections)
 			trackedObjects.back().trackingState = "New (1)";
 			trackedObjects.back().lastVisibleRects.push_back(detection.rect);
 		}
+		
+		if (stateHistory) {
+			std::map<int, TrackedObjectState> current_frame_states;
+			for (auto &track : trackedObjects) {
+				TrackedObjectState state;
+				state.id = (int)track.id;
+				state.rect = track.rect;
+				state.is_extrapolated = (track.unseenFrames > 0);
+				state.hit_streak = track.hitFrames;
+				state.is_confirmed = (track.hitFrames >= this->minHitFrames);
+				current_frame_states[(int)track.id] = state;
+			}
+			stateHistory->push_frame_state(frameId, current_frame_states);
+		}
+		
 		return trackedObjects;
 	}
 
@@ -378,6 +408,27 @@ std::vector<Object> Sort::update(const std::vector<Object> &detections)
 		}
 	}
 	trackedObjects = newTrackedObjects;
+
+	if (stateHistory) {
+		std::map<int, TrackedObjectState> current_frame_states;
+		for (auto &track : trackedObjects) {
+			TrackedObjectState state;
+			state.id = (int)track.id;
+			state.rect = track.rect;
+			state.is_extrapolated = (track.unseenFrames > 0);
+			state.hit_streak = track.hitFrames;
+			
+			// Detect when an object just reached minHitFrames
+			if (track.hitFrames == this->minHitFrames && this->minHitFrames > 1) {
+				uint64_t start_f = (frameId > (uint64_t)(track.hitFrames - 1)) ? (frameId - track.hitFrames + 1) : 0;
+				stateHistory->retroactively_confirm(start_f, frameId, (int)track.id);
+			}
+			
+			state.is_confirmed = (track.hitFrames >= this->minHitFrames);
+			current_frame_states[(int)track.id] = state;
+		}
+		stateHistory->push_frame_state(frameId, current_frame_states);
+	}
 
 	return trackedObjects;
 }

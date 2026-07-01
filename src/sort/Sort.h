@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "ort-model/types.hpp"
+#include "StateHistory.h"
 
 class Sort {
 public:
@@ -16,7 +17,7 @@ public:
 	~Sort();
 
 	// Update the tracking with detected objects
-	std::vector<Object> update(const std::vector<Object> &detections);
+	std::vector<Object> update(uint64_t frameId, const std::vector<Object> &detections);
 
 	// Get the current tracked objects and their classes
 	std::vector<Object> getTrackedObjects() const;
@@ -116,6 +117,13 @@ private:
 	size_t ghostRecoveryMaxUnseen = 3;
 	float kalmanMinNoise = 0.35f;
 	float kalmanAreaThreshold = 0.0f;
+	
+	std::shared_ptr<StateHistoryManager> stateHistory;
+
+public:
+	void setStateHistoryManager(std::shared_ptr<StateHistoryManager> manager) {
+		stateHistory = manager;
+	}
 };
 
 #endif

@@ -5,6 +5,7 @@
 #include <util/circlebuf.h>
 #include "ort-model/ONNXRuntimeModel.h"
 #include "sort/Sort.h"
+#include "sort/StateHistory.h"
 #include "yunet/YuNet.h"
 #include "sface/SFace.h"
 #include <unordered_map>
@@ -97,13 +98,19 @@ struct filter_data {
 
 	// create SORT tracker
 	Sort tracker;
+	std::shared_ptr<StateHistoryManager> stateHistory;
 	std::unordered_set<uint64_t> faceExemptIds;
 
 	obs_source_t *source;
 	gs_texrender_t *texrender;
 
 	int videoDelayFrames;
+	int lookaheadDelayFrames = 10;
+	
 	std::deque<gs_texture_t*> delayedTextures;
+	std::deque<uint64_t> delayedFrameIds;
+	uint64_t currentFrameId = 0;
+	
 	std::vector<gs_texture_t*> texturePool;
 	gs_stagesurf_t *stagesurface;
 	gs_effect_t *kawaseBlurEffect;
@@ -148,6 +155,7 @@ struct filter_data {
 	cv::Mat inferenceInputFrame;
 	cv::Rect inferenceCropRect;
 	bool inferenceFrameReady;
+	uint64_t inferenceFrameId;
 	uint64_t frameCount;
 
 	// Face Inference background thread
