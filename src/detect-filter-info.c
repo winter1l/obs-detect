@@ -14,4 +14,5 @@ struct obs_source_info detect_filter_info = {
 	.deactivate = detect_filter_deactivate,
 	.video_tick = detect_filter_video_tick,
 	.video_render = detect_filter_video_render,
+	.filter_audio = detect_filter_audio,
 };

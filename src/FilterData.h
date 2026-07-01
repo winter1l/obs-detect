@@ -2,6 +2,7 @@
 #define FILTERDATA_H
 
 #include <obs-module.h>
+#include <util/circlebuf.h>
 #include "ort-model/ONNXRuntimeModel.h"
 #include "sort/Sort.h"
 #include "yunet/YuNet.h"
@@ -110,10 +111,17 @@ struct filter_data {
 	gs_effect_t *pixelateEffect;
 	gs_texture_t *baseTexture;
 
-
-
 	bool useGpuZeroCopyCurrentFrame = false;
 	cv::Mat inputBGRA;
+	std::mutex inputBGRALock;
+
+	// Audio sync
+	struct circlebuf audioBuffers[MAX_AUDIO_CHANNELS];
+	std::mutex audioMutex;
+	float lastSamples[MAX_AUDIO_CHANNELS][2]; // For smoothing/crossfade
+	uint64_t lastAudioPts = 0;
+	bool resetAudio = false;
+
 	cv::Mat outputPreviewBGRA;
 	cv::Mat outputMask;
 	std::vector<Object> latestObjects;
@@ -128,8 +136,6 @@ struct filter_data {
 
 	bool isDisabled;
 	bool preview;
-
-	std::mutex inputBGRALock;
 	std::mutex outputLock;
 	std::mutex modelMutex;
 
@@ -170,3 +176,7 @@ struct filter_data {
 };
 
 #endif /* FILTERDATA_H */
+
+void detect_filter_video_tick(void *data, float seconds);
+void detect_filter_video_render(void *data, gs_effect_t *effect);
+struct obs_audio_data *detect_filter_audio(void *data, struct obs_audio_data *audio);

@@ -610,7 +610,12 @@ void detect_filter_update(void *data, obs_data_t *settings)
 
 	tf->preview = obs_data_get_bool(settings, "preview");
 
-	tf->videoDelayFrames = (int)obs_data_get_int(settings, "video_delay_frames");
+	int newVideoDelayFrames = (int)obs_data_get_int(settings, "video_delay_frames");
+	if (tf->videoDelayFrames != newVideoDelayFrames) {
+		tf->videoDelayFrames = newVideoDelayFrames;
+		std::lock_guard<std::mutex> lock(tf->audioMutex);
+		tf->resetAudio = true;
+	}
 	tf->debugMode = obs_data_get_bool(settings, "debug_mode");
 	tf->conf_threshold = (float)obs_data_get_double(settings, "threshold");
 	tf->objectCategory = (int)obs_data_get_int(settings, "object_category");
@@ -1474,6 +1479,12 @@ void *detect_filter_create(obs_data_t *settings, obs_source_t *source)
 	tf->lastDetectedObjectId = -1;
 	tf->frameCount = 0;
 
+	for (int i = 0; i < MAX_AUDIO_CHANNELS; i++) {
+		circlebuf_init(&tf->audioBuffers[i]);
+		tf->lastSamples[i][0] = 0.0f;
+		tf->lastSamples[i][1] = 0.0f;
+	}
+
 	std::vector<std::tuple<const char *, gs_effect_t **>> effects = {
 		{KAWASE_BLUR_EFFECT_PATH, &tf->kawaseBlurEffect},
 		{MASKING_EFFECT_PATH, &tf->maskingEffect},
@@ -1585,6 +1596,11 @@ void detect_filter_destroy(void *data)
 			gs_effect_destroy(tf->pixelateEffect);
 		}
 		obs_leave_graphics();
+
+		for (int i = 0; i < MAX_AUDIO_CHANNELS; i++) {
+			circlebuf_free(&tf->audioBuffers[i]);
+		}
+
 		tf->~detect_filter();
 		bfree(tf);
 	}
@@ -2275,4 +2291,88 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 		obs_source_skip_video_filter(tf->source);
 	}
 	return;
+}
+
+struct obs_audio_data *detect_filter_audio(void *data, struct obs_audio_data *audio)
+{
+	struct detect_filter *tf = reinterpret_cast<struct detect_filter *>(data);
+	if (!tf || tf->isDisabled)
+		return audio;
+
+	std::lock_guard<std::mutex> lock(tf->audioMutex);
+
+	uint32_t sample_rate = 48000;
+	struct obs_audio_info audio_info;
+	if (obs_get_audio_info(&audio_info)) {
+		sample_rate = audio_info.samples_per_sec;
+	}
+
+	double fps = 60.0;
+	struct obs_video_info ovi;
+	if (obs_get_video_info(&ovi) && ovi.fps_den > 0) {
+		fps = (double)ovi.fps_num / (double)ovi.fps_den;
+	}
+
+	uint64_t target_delay_samples = (uint64_t)round(tf->videoDelayFrames * sample_rate / fps);
+	size_t target_delay_bytes = target_delay_samples * sizeof(float);
+
+	if (tf->resetAudio) {
+		for (int c = 0; c < MAX_AUDIO_CHANNELS; c++) {
+			if (audio->data[c]) {
+				float *samples = reinterpret_cast<float*>(audio->data[c]);
+				float start_val = tf->lastSamples[c][1];
+				uint32_t fade_len = (audio->frames >= 64) ? 64 : audio->frames;
+				for (uint32_t i = 0; i < fade_len; i++) {
+					float ratio = (float)i / (float)fade_len;
+					samples[i] = start_val * (1.0f - ratio);
+				}
+				if (audio->frames > fade_len) {
+					std::memset(samples + fade_len, 0, (audio->frames - fade_len) * sizeof(float));
+				}
+				tf->lastSamples[c][0] = 0.0f;
+				tf->lastSamples[c][1] = 0.0f;
+			}
+		}
+
+		for (int i = 0; i < MAX_AUDIO_CHANNELS; i++) {
+			circlebuf_free(&tf->audioBuffers[i]);
+			circlebuf_init(&tf->audioBuffers[i]);
+		}
+
+		if (target_delay_bytes > 0) {
+			std::vector<uint8_t> zeros(target_delay_bytes, 0);
+			for (int i = 0; i < MAX_AUDIO_CHANNELS; i++) {
+				circlebuf_push_back(&tf->audioBuffers[i], zeros.data(), target_delay_bytes);
+			}
+		}
+
+		tf->resetAudio = false;
+	}
+
+	if (target_delay_bytes == 0) {
+		return audio;
+	}
+
+	for (int c = 0; c < MAX_AUDIO_CHANNELS; c++) {
+		if (!audio->data[c])
+			continue;
+
+		size_t frame_bytes = audio->frames * sizeof(float);
+
+		if (audio->frames > 1) {
+			float *samples = reinterpret_cast<float*>(audio->data[c]);
+			tf->lastSamples[c][0] = samples[audio->frames - 2];
+			tf->lastSamples[c][1] = samples[audio->frames - 1];
+		}
+
+		circlebuf_push_back(&tf->audioBuffers[c], audio->data[c], frame_bytes);
+
+		if (tf->audioBuffers[c].size >= frame_bytes) {
+			circlebuf_pop_front(&tf->audioBuffers[c], audio->data[c], frame_bytes);
+		} else {
+			std::memset(audio->data[c], 0, frame_bytes);
+		}
+	}
+
+	return audio;
 }

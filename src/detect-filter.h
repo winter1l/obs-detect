@@ -14,6 +14,7 @@ void detect_filter_activate(void *data);
 void detect_filter_deactivate(void *data);
 void detect_filter_video_tick(void *data, float seconds);
 void detect_filter_video_render(void *data, gs_effect_t *_effect);
+struct obs_audio_data *detect_filter_audio(void *data, struct obs_audio_data *audio);
 
 #ifdef __cplusplus
 }
