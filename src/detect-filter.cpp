@@ -385,7 +385,7 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_add_float_slider(sort_group_props, "ghost_recovery_multiplier", obs_module_text("GhostRecoveryMultiplier"), 0.5, 5.0, 0.1);
 	obs_properties_add_int(sort_group_props, "ghost_recovery_max_unseen", obs_module_text("GhostRecoveryMaxUnseen"), 1, 15, 1);
 	obs_properties_add_float_slider(sort_group_props, "kalman_min_noise", obs_module_text("KalmanMinNoise"), 0.01, 1.0, 0.01);
-	obs_properties_add_float_slider(sort_group_props, "kalman_area_threshold", obs_module_text("KalmanAreaThreshold"), 0.01, 1.0, 0.01);
+	obs_properties_add_float_slider(sort_group_props, "kalman_area_threshold", obs_module_text("KalmanAreaThreshold"), 0.0, 1.0, 0.01);
 
 	// Hide subproperties completely when unchecked
 	obs_property_set_modified_callback(sort_tracking, [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
@@ -601,7 +601,7 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_double(settings, "ghost_recovery_multiplier", 2.0);
 	obs_data_set_default_int(settings, "ghost_recovery_max_unseen", 3);
 	obs_data_set_default_double(settings, "kalman_min_noise", 0.3);
-	obs_data_set_default_double(settings, "kalman_area_threshold", 0.10);
+	obs_data_set_default_double(settings, "kalman_area_threshold", 0.0);
 }
 
 void detect_filter_update(void *data, obs_data_t *settings)

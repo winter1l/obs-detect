@@ -58,8 +58,12 @@ void Sort::initializeKalmanFilter(cv::KalmanFilter &kf, const cv::Rect_<float> &
 	float noiseMultiplier = 1.0f;
 	if (this->screenArea > 0.0f) {
 		float area_ratio = bbox.area() / this->screenArea;
-		float multiplier = (this->kalmanAreaThreshold > 0.0f) ? (1.0f / this->kalmanAreaThreshold) : 10.0f;
-		noiseMultiplier = std::clamp(area_ratio * multiplier, this->kalmanMinNoise, 1.0f);
+		if (this->kalmanAreaThreshold <= 0.0f) {
+			noiseMultiplier = 1.0f;
+		} else {
+			float multiplier = 1.0f / this->kalmanAreaThreshold;
+			noiseMultiplier = std::clamp(area_ratio * multiplier, this->kalmanMinNoise, 1.0f);
+		}
 	}
 	
 	kf.measurementNoiseCov =
@@ -91,8 +95,12 @@ cv::Rect_<float> Sort::updateKalmanFilter(cv::KalmanFilter &kf, const cv::Rect_<
 	float noiseMultiplier = 1.0f;
 	if (this->screenArea > 0.0f) {
 		float area_ratio = bbox.area() / this->screenArea;
-		float multiplier = (this->kalmanAreaThreshold > 0.0f) ? (1.0f / this->kalmanAreaThreshold) : 10.0f;
-		noiseMultiplier = std::clamp(area_ratio * multiplier, this->kalmanMinNoise, 1.0f);
+		if (this->kalmanAreaThreshold <= 0.0f) {
+			noiseMultiplier = 1.0f;
+		} else {
+			float multiplier = 1.0f / this->kalmanAreaThreshold;
+			noiseMultiplier = std::clamp(area_ratio * multiplier, this->kalmanMinNoise, 1.0f);
+		}
 	}
 	kf.measurementNoiseCov =
 		(cv::Mat_<float>(4, 4) << 4, 0, 0, 0, 0, 4, 0, 0, 0, 0, 10, 0, 0, 0, 0, 10) * noiseMultiplier;
