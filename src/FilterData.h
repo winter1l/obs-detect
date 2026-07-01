@@ -110,7 +110,7 @@ struct filter_data {
 	gs_effect_t *pixelateEffect;
 	gs_texture_t *baseTexture;
 
-	bool syncMode;
+
 
 	bool useGpuZeroCopyCurrentFrame = false;
 	cv::Mat inputBGRA;

@@ -143,7 +143,7 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_t *props = obs_properties_create();
 
 	obs_properties_add_bool(props, "preview", obs_module_text("Preview"));
-	obs_properties_add_bool(props, "sync_mode", obs_module_text("SynchronousMode"));
+
 	obs_properties_add_int_slider(props, "video_delay_frames", obs_module_text("VideoDelayFrames"), 0, 5, 1);
 
 	// add dropdown selection for object category selection: "All", or COCO classes
@@ -551,7 +551,7 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "sort_tracking", true);
 	obs_data_set_default_bool(settings, "show_unseen_objects", false);
 	obs_data_set_default_bool(settings, "preview", false);
-	obs_data_set_default_bool(settings, "sync_mode", false);
+
 	obs_data_set_default_int(settings, "video_delay_frames", 0);
 	obs_data_set_default_bool(settings, "debug_mode", false);
 	obs_data_set_default_double(settings, "face_match_threshold", 0.36);
@@ -609,7 +609,7 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	tf->isDisabled = true;
 
 	tf->preview = obs_data_get_bool(settings, "preview");
-	tf->syncMode = obs_data_get_bool(settings, "sync_mode");
+
 	tf->videoDelayFrames = (int)obs_data_get_int(settings, "video_delay_frames");
 	tf->debugMode = obs_data_get_bool(settings, "debug_mode");
 	tf->conf_threshold = (float)obs_data_get_double(settings, "threshold");
@@ -1839,17 +1839,12 @@ void detect_filter_video_tick(void *data, float seconds)
 	}
 
 	if (!use_gpu_zero_copy) {
-		if (tf->syncMode) {
+		std::unique_lock<std::mutex> lock(tf->inferenceMutex, std::try_to_lock);
+		if (lock.owns_lock() && !tf->isInferencing) {
 			tf->useGpuZeroCopyCurrentFrame = false;
-			run_model_inference(tf, imageBGRA);
-		} else {
-			std::unique_lock<std::mutex> lock(tf->inferenceMutex, std::try_to_lock);
-			if (lock.owns_lock() && !tf->isInferencing) {
-				tf->useGpuZeroCopyCurrentFrame = false;
-				tf->inferenceInputFrame = std::move(imageBGRA);
-				tf->inferenceFrameReady = true;
-				tf->inferenceCV.notify_one();
-			}
+			tf->inferenceInputFrame = std::move(imageBGRA);
+			tf->inferenceFrameReady = true;
+			tf->inferenceCV.notify_one();
 		}
 	}
 
