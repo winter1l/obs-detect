@@ -1448,7 +1448,11 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 		}
 
 		std::lock_guard<std::mutex> lock(tf->outputLock);
-		tf->outputPreviewBGRA = overlay.clone();
+		tf->previewHistory[tf->inferenceFrameId] = overlay.clone();
+		// Clean up old preview frames
+		while (!tf->previewHistory.empty() && tf->previewHistory.begin()->first < (tf->inferenceFrameId > 120 ? tf->inferenceFrameId - 120 : 0)) {
+			tf->previewHistory.erase(tf->previewHistory.begin());
+		}
 	}
 
 	auto end_time = std::chrono::high_resolution_clock::now();
@@ -2148,12 +2152,21 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 		{
 			// lock the outputLock mutex
 			std::lock_guard<std::mutex> lock(tf->outputLock);
-			if (tf->outputPreviewBGRA.empty() || 
-			    (uint32_t)tf->outputPreviewBGRA.cols != width ||
-			    (uint32_t)tf->outputPreviewBGRA.rows != height) {
+			if (tf->previewHistory.empty()) {
 				skip_preview = true;
 			} else {
-				localOutputBGRA = tf->outputPreviewBGRA;
+				auto it = tf->previewHistory.upper_bound(renderFrameId);
+				if (it != tf->previewHistory.begin()) {
+					--it; // Closest available frame <= renderFrameId
+					localOutputBGRA = it->second;
+				} else {
+					localOutputBGRA = tf->previewHistory.begin()->second;
+				}
+				
+				if ((uint32_t)localOutputBGRA.cols != width ||
+				    (uint32_t)localOutputBGRA.rows != height) {
+					skip_preview = true;
+				}
 			}
 		}
 		if (!skip_preview) {
@@ -2168,37 +2181,40 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 			gs_effect_get_param_by_name(tf->maskingEffect, "color");
 
 		if (tf->maskingEnabled) {
-			// Convert objects to mask rects
-			std::vector<Object> current_objects;
-			{
-				std::lock_guard<std::mutex> lock(tf->outputLock);
-				current_objects = tf->latestObjects;
-			}
-
 			vec4 mask_rects[64];
 			memset(mask_rects, 0, sizeof(vec4) * 64);
 			int num_mask_rects = 0;
-			for (const Object &obj : current_objects) {
-				if (num_mask_rects >= 64) break;
-				cv::Rect2f rect = obj.rect;
-				float expansion = 0.0f;
-				if (tf->maskingDynamicExpansion) {
-					expansion = tf->maskingDynamicExpansionBase + (rect.height * tf->maskingDynamicExpansionRatio);
-				} else if (tf->maskingDilateIterations > 0) {
-					expansion = (float)tf->maskingDilateIterations;
+			
+			if (tf->stateHistory) {
+				std::set<int> active_ids = tf->stateHistory->get_all_active_ids(renderFrameId, renderFrameId);
+				for (int id : active_ids) {
+					if (num_mask_rects >= 64) break;
+					
+					TrackedObjectState current_state;
+					if (tf->stateHistory->get_object_state(renderFrameId, id, current_state)) {
+						if (current_state.is_confirmed) {
+							cv::Rect2f rect = current_state.rect;
+							float expansion = 0.0f;
+							if (tf->maskingDynamicExpansion) {
+								expansion = tf->maskingDynamicExpansionBase + (rect.height * tf->maskingDynamicExpansionRatio);
+							} else if (tf->maskingDilateIterations > 0) {
+								expansion = (float)tf->maskingDilateIterations;
+							}
+							if (expansion > 0.0f) {
+								rect.x -= expansion;
+								rect.y -= expansion;
+								rect.width += expansion * 2.0f;
+								rect.height += expansion * 2.0f;
+							}
+							vec4_set(&mask_rects[num_mask_rects], 
+								rect.x / (float)width, 
+								rect.y / (float)height, 
+								rect.width / (float)width, 
+								rect.height / (float)height);
+							num_mask_rects++;
+						}
+					}
 				}
-				if (expansion > 0.0f) {
-					rect.x -= expansion;
-					rect.y -= expansion;
-					rect.width += expansion * 2.0f;
-					rect.height += expansion * 2.0f;
-				}
-				vec4_set(&mask_rects[num_mask_rects], 
-					rect.x / (float)width, 
-					rect.y / (float)height, 
-					rect.width / (float)width, 
-					rect.height / (float)height);
-				num_mask_rects++;
 			}
 
 			auto apply_masks_to_effect = [&](gs_effect_t* effect) {

@@ -12,6 +12,7 @@
 #include <unordered_set>
 #include <chrono>
 #include <vector>
+#include <map>
 #include <mutex>
 #include <deque>
 #include <thread>
@@ -129,7 +130,7 @@ struct filter_data {
 	uint64_t lastAudioPts = 0;
 	bool resetAudio = false;
 
-	cv::Mat outputPreviewBGRA;
+	std::map<uint64_t, cv::Mat> previewHistory;
 	cv::Mat outputMask;
 	std::vector<Object> latestObjects;
 
