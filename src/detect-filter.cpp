@@ -1991,6 +1991,104 @@ void detect_filter_video_tick(void *data, float seconds)
 	}
 }
 
+// 바운딩 박스 크기 확장 함수 (Padding)
+static cv::Rect2f scaleBoundingBox(const cv::Rect2f& rect, float scale) {
+	float dw = rect.width * (scale - 1.0f);
+	float dh = rect.height * (scale - 1.0f);
+	return cv::Rect2f(rect.x - dw / 2.0f, rect.y - dh / 2.0f, rect.width + dw, rect.height + dh);
+}
+
+// 렌더링 스레드에서 특정 프레임 R을 그릴 때 호출하는 마스크 도출 함수
+static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R, const StateHistoryManager* historyManager, uint64_t current_realtime_T, std::string& out_mode) {
+	if (!historyManager) {
+		out_mode = "None";
+		return cv::Rect2f(0, 0, 0, 0);
+	}
+	
+	TrackedObjectState current_state;
+	bool exists_now = historyManager->get_object_state(R, object_id, current_state);
+
+	// 1. 현재 프레임에 완벽하게 검증(Confirmed)되고 실제 감지된 상태인 경우
+	if (exists_now && current_state.is_confirmed && !current_state.is_extrapolated) {
+		out_mode = "Confirmed";
+		return current_state.rect;
+	}
+
+	// 2. 미래 상태 룩어헤드 탐색 (R+1부터 현재 실시간 프레임 T까지의 상태 검사)
+	bool will_be_confirmed = false;
+	bool will_be_recovered = false;
+	uint64_t first_active_future_frame = 0;
+
+	const auto buffer = historyManager->get_buffer_copy();
+	for (auto it = buffer.rbegin(); it != buffer.rend(); ++it) {
+		if (it->frame_id > R && it->frame_id <= current_realtime_T) {
+			auto obj_it = it->objects.find(object_id);
+			if (obj_it != it->objects.end()) {
+				const auto& future_state = obj_it->second;
+				if (future_state.is_confirmed && !future_state.is_extrapolated) {
+					will_be_confirmed = true;
+					will_be_recovered = true;
+					first_active_future_frame = it->frame_id;
+					// Since we iterate backwards (newest to oldest), the LAST match we find 
+					// will be the EARLIEST future frame! So we don't break immediately, we let it finish.
+				}
+			}
+		}
+	}
+
+	// 3. 최초 등장 시 역방향 마스킹 처리 (T-2 ~ T 보완)
+	if (will_be_confirmed && (first_active_future_frame > R) && (first_active_future_frame - R <= 2) && (!exists_now || !current_state.is_confirmed)) {
+		TrackedObjectState future_active_state;
+		if (historyManager->get_object_state(first_active_future_frame, object_id, future_active_state)) {
+			out_mode = "Reverse Masking";
+			return scaleBoundingBox(future_active_state.rect, 1.2f);
+		}
+	}
+
+	// 4. 일시 유실 구간 내삽 보간 처리
+	if (will_be_recovered && exists_now && current_state.is_confirmed && current_state.is_extrapolated) {
+		// 유실되기 직전 마지막 정상 감지 프레임 탐색
+		uint64_t last_active_frame = R > 0 ? R - 1 : 0;
+		TrackedObjectState left_state;
+		bool found_left = false;
+		while (R >= 30 && last_active_frame >= R - 30) {
+			if (historyManager->get_object_state(last_active_frame, object_id, left_state)) {
+				if (left_state.is_confirmed && !left_state.is_extrapolated) {
+					found_left = true;
+					break;
+				}
+			}
+			if (last_active_frame == 0) break;
+			last_active_frame--;
+		}
+
+		TrackedObjectState right_state;
+		if (found_left && historyManager->get_object_state(first_active_future_frame, object_id, right_state)) {
+			float total_dist = static_cast<float>(first_active_future_frame - last_active_frame);
+			float current_dist = static_cast<float>(R - last_active_frame);
+			float weight = total_dist > 0 ? (current_dist / total_dist) : 0.0f;
+
+			cv::Rect2f interpolated_rect;
+			interpolated_rect.x = (1.0f - weight) * left_state.rect.x + weight * right_state.rect.x;
+			interpolated_rect.y = (1.0f - weight) * left_state.rect.y + weight * right_state.rect.y;
+			interpolated_rect.width = (1.0f - weight) * left_state.rect.width + weight * right_state.rect.width;
+			interpolated_rect.height = (1.0f - weight) * left_state.rect.height + weight * right_state.rect.height;
+
+			out_mode = "Interpolated";
+			return interpolated_rect;
+		}
+	}
+
+	// 5. 복구 불가능한 장기 가림 상태인 경우
+	if (exists_now && current_state.is_confirmed && current_state.is_extrapolated) {
+		out_mode = "Extrapolated";
+		return current_state.rect; 
+	}
+
+	out_mode = "Ghost";
+	return cv::Rect2f(0, 0, 0, 0);
+}
+
 void detect_filter_video_render(void *data, gs_effect_t *_effect)
 {
 	UNUSED_PARAMETER(_effect);
@@ -2172,6 +2270,31 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 		}
 		if (!skip_preview) {
 			outputBGRA = localOutputBGRA.clone();
+			
+			if (tf->debugMode && tf->stateHistory) {
+				std::set<int> active_ids = tf->stateHistory->get_all_active_ids(renderFrameId);
+				for (int id : active_ids) {
+					std::string mode_str;
+					cv::Rect2f rect = getFinalRenderBox(id, renderFrameId, tf->stateHistory.get(), tf->currentFrameId, mode_str);
+					if (rect.width > 0 && rect.height > 0) {
+						std::string text = "[" + mode_str + "]";
+						cv::Scalar color(0, 255, 255, 255); // Yellow
+						if (mode_str == "Confirmed") color = cv::Scalar(0, 255, 0, 255); // Green
+						else if (mode_str == "Interpolated") color = cv::Scalar(255, 165, 0, 255); // Orange
+						else if (mode_str == "Reverse Masking") color = cv::Scalar(255, 0, 255, 255); // Magenta
+						else if (mode_str == "Extrapolated") color = cv::Scalar(0, 0, 255, 255); // Red
+						
+						int baseline = 0;
+						cv::Size textSize = cv::getTextSize(text, cv::FONT_HERSHEY_SIMPLEX, 0.5, 2, &baseline);
+						cv::Point textOrg((int)rect.x, (int)rect.y - 10);
+						if (textOrg.y < textSize.height) textOrg.y = (int)(rect.y + rect.height) + textSize.height + 10;
+						
+						// Draw text outline for visibility
+						cv::putText(outputBGRA, text, textOrg, cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0, 255), 4, cv::LINE_AA);
+						cv::putText(outputBGRA, text, textOrg, cv::FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv::LINE_AA);
+					}
+				}
+			}
 		}
 
 		gs_texture_t *tex = delayed_tex;
@@ -2191,29 +2314,28 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 				for (int id : active_ids) {
 					if (num_mask_rects >= 64) break;
 					
-					TrackedObjectState current_state;
-					if (tf->stateHistory->get_object_state(renderFrameId, id, current_state)) {
-						if (current_state.is_confirmed) {
-							cv::Rect2f rect = current_state.rect;
-							float expansion = 0.0f;
-							if (tf->maskingDynamicExpansion) {
-								expansion = tf->maskingDynamicExpansionBase + (rect.height * tf->maskingDynamicExpansionRatio);
-							} else if (tf->maskingDilateIterations > 0) {
-								expansion = (float)tf->maskingDilateIterations;
-							}
-							if (expansion > 0.0f) {
-								rect.x -= expansion;
-								rect.y -= expansion;
-								rect.width += expansion * 2.0f;
-								rect.height += expansion * 2.0f;
-							}
-							vec4_set(&mask_rects[num_mask_rects], 
-								rect.x / (float)width, 
-								rect.y / (float)height, 
-								rect.width / (float)width, 
-								rect.height / (float)height);
-							num_mask_rects++;
+					std::string mode_str;
+					cv::Rect2f rect = getFinalRenderBox(id, renderFrameId, tf->stateHistory.get(), tf->currentFrameId, mode_str);
+					
+					if (rect.width > 0 && rect.height > 0 && mode_str != "Ghost") {
+						float expansion = 0.0f;
+						if (tf->maskingDynamicExpansion) {
+							expansion = tf->maskingDynamicExpansionBase + (rect.height * tf->maskingDynamicExpansionRatio);
+						} else if (tf->maskingDilateIterations > 0) {
+							expansion = (float)tf->maskingDilateIterations;
 						}
+						if (expansion > 0.0f) {
+							rect.x -= expansion;
+							rect.y -= expansion;
+							rect.width += expansion * 2.0f;
+							rect.height += expansion * 2.0f;
+						}
+						vec4_set(&mask_rects[num_mask_rects], 
+							rect.x / (float)width, 
+							rect.y / (float)height, 
+							rect.width / (float)width, 
+							rect.height / (float)height);
+						num_mask_rects++;
 					}
 				}
 			}
