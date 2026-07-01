@@ -45,12 +45,20 @@ void StateHistoryManager::retroactively_confirm(uint64_t start_frame, uint64_t e
 	}
 }
 
-std::set<int> StateHistoryManager::get_all_active_ids(uint64_t target_frame) const
+std::set<int> StateHistoryManager::get_all_active_ids(uint64_t start_frame, uint64_t end_frame) const
 {
 	std::lock_guard<std::mutex> lock(mutex_);
 	std::set<int> active_ids;
+	for (const auto &history : buffer) {
+		if (history.frame_id >= start_frame && history.frame_id <= end_frame) {
+			for (const auto &pair : history.objects) {
+				active_ids.insert(pair.first);
+			}
+		}
+	}
+	// Also get the closest frame BEFORE start_frame (in case AI skipped frames in the range)
 	for (auto it = buffer.rbegin(); it != buffer.rend(); ++it) {
-		if (it->frame_id <= target_frame) {
+		if (it->frame_id <= start_frame) {
 			for (const auto &pair : it->objects) {
 				active_ids.insert(pair.first);
 			}

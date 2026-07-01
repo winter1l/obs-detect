@@ -147,8 +147,8 @@ std::vector<Object> Sort::update(uint64_t frameId, const std::vector<Object> &de
 
 				trackedObjects[i].rect.x += dx;
 				trackedObjects[i].rect.y += dy;
-				trackedObjects[i].rect.width += dw;
-				trackedObjects[i].rect.height += dh;
+				trackedObjects[i].rect.width = std::max(5.0f, trackedObjects[i].rect.width + dw);
+				trackedObjects[i].rect.height = std::max(5.0f, trackedObjects[i].rect.height + dh);
 				predict(trackedObjects[i].kf); // update internal KF state
 			} else {
 				predict(trackedObjects[i].kf); // update internal KF state but keep rect stationary
@@ -234,8 +234,8 @@ std::vector<Object> Sort::update(uint64_t frameId, const std::vector<Object> &de
 
 			trackedObjects[i].rect.x += dx;
 			trackedObjects[i].rect.y += dy;
-			trackedObjects[i].rect.width += dw;
-			trackedObjects[i].rect.height += dh;
+			trackedObjects[i].rect.width = std::max(5.0f, trackedObjects[i].rect.width + dw);
+			trackedObjects[i].rect.height = std::max(5.0f, trackedObjects[i].rect.height + dh);
 			predict(trackedObjects[i].kf); // update internal KF state
 		} else {
 			predict(trackedObjects[i].kf); // update internal KF state but keep rect stationary

@@ -2048,18 +2048,23 @@ static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R, const StateHistor
 	// 4. 일시 유실 구간 내삽 보간 처리
 	if (will_be_recovered && exists_now && current_state.is_confirmed && current_state.is_extrapolated) {
 		// 유실되기 직전 마지막 정상 감지 프레임 탐색
-		uint64_t last_active_frame = R > 0 ? R - 1 : 0;
+		uint64_t last_active_frame = 0;
 		TrackedObjectState left_state;
 		bool found_left = false;
-		while (R >= 30 && last_active_frame >= R - 30) {
-			if (historyManager->get_object_state(last_active_frame, object_id, left_state)) {
-				if (left_state.is_confirmed && !left_state.is_extrapolated) {
-					found_left = true;
-					break;
+		
+		for (auto it = buffer.begin(); it != buffer.end(); ++it) {
+			if (it->frame_id < R) { // Look for frames strictly before R
+				auto obj_it = it->objects.find(object_id);
+				if (obj_it != it->objects.end()) {
+					if (obj_it->second.is_confirmed && !obj_it->second.is_extrapolated) {
+						found_left = true;
+						left_state = obj_it->second;
+						last_active_frame = it->frame_id;
+					}
 				}
+			} else {
+				break; // Optimization: stop searching once we reach or pass R
 			}
-			if (last_active_frame == 0) break;
-			last_active_frame--;
 		}
 
 		TrackedObjectState right_state;
@@ -2272,7 +2277,7 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 			outputBGRA = localOutputBGRA.clone();
 			
 			if (tf->debugMode && tf->stateHistory) {
-				std::set<int> active_ids = tf->stateHistory->get_all_active_ids(renderFrameId);
+				std::set<int> active_ids = tf->stateHistory->get_all_active_ids(renderFrameId, tf->currentFrameId);
 				for (int id : active_ids) {
 					std::string mode_str;
 					cv::Rect2f rect = getFinalRenderBox(id, renderFrameId, tf->stateHistory.get(), tf->currentFrameId, mode_str);
@@ -2310,7 +2315,7 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 			int num_mask_rects = 0;
 			
 			if (tf->stateHistory) {
-				std::set<int> active_ids = tf->stateHistory->get_all_active_ids(renderFrameId);
+				std::set<int> active_ids = tf->stateHistory->get_all_active_ids(renderFrameId, tf->currentFrameId);
 				for (int id : active_ids) {
 					if (num_mask_rects >= 64) break;
 					
