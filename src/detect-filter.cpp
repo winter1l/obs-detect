@@ -384,13 +384,11 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_add_bool(sort_group_props, "show_unseen_objects", obs_module_text("ShowUnseenObjects"));
 	obs_properties_add_float_slider(sort_group_props, "ghost_recovery_multiplier", obs_module_text("GhostRecoveryMultiplier"), 0.5, 5.0, 0.1);
 	obs_properties_add_int(sort_group_props, "ghost_recovery_max_unseen", obs_module_text("GhostRecoveryMaxUnseen"), 1, 15, 1);
-	obs_properties_add_float_slider(sort_group_props, "kalman_min_noise", obs_module_text("KalmanMinNoise"), 0.01, 1.0, 0.01);
-	obs_properties_add_float_slider(sort_group_props, "kalman_area_threshold", obs_module_text("KalmanAreaThreshold"), 0.0, 1.0, 0.01);
 
 	// Hide subproperties completely when unchecked
 	obs_property_set_modified_callback(sort_tracking, [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
 		const bool enabled = obs_data_get_bool(settings, "sort_tracking");
-		for (auto prop_name : {"min_hit_frames", "iou_threshold", "instant_track_area_ratio", "max_unseen_frames", "show_unseen_objects", "ghost_recovery_multiplier", "ghost_recovery_max_unseen", "kalman_min_noise", "kalman_area_threshold"}) {
+		for (auto prop_name : {"min_hit_frames", "iou_threshold", "instant_track_area_ratio", "max_unseen_frames", "show_unseen_objects", "ghost_recovery_multiplier", "ghost_recovery_max_unseen"}) {
 			obs_property_t *prop = obs_properties_get(props_, prop_name);
 			if (prop) obs_property_set_visible(prop, enabled);
 		}
@@ -600,8 +598,6 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "crop_bottom", 0);
 	obs_data_set_default_double(settings, "ghost_recovery_multiplier", 2.0);
 	obs_data_set_default_int(settings, "ghost_recovery_max_unseen", 3);
-	obs_data_set_default_double(settings, "kalman_min_noise", 0.3);
-	obs_data_set_default_double(settings, "kalman_area_threshold", 0.0);
 }
 
 void detect_filter_update(void *data, obs_data_t *settings)
@@ -651,10 +647,8 @@ void detect_filter_update(void *data, obs_data_t *settings)
 		tf->tracker.setMaxUnseenFrames(maxUnseenFrames);
 	}
 	
-	float kalmanMinNoise = (float)obs_data_get_double(settings, "kalman_min_noise");
-	float kalmanAreaThreshold = (float)obs_data_get_double(settings, "kalman_area_threshold");
-	tf->tracker.setKalmanMinNoise(kalmanMinNoise);
-	tf->tracker.setKalmanAreaThreshold(kalmanAreaThreshold);
+	tf->tracker.setKalmanMinNoise(0.35f);
+	tf->tracker.setKalmanAreaThreshold(0.0f);
 	tf->showUnseenObjects = obs_data_get_bool(settings, "show_unseen_objects");
 	tf->saveDetectionsPath = obs_data_get_string(settings, "save_detections_path");
 	tf->crop_enabled = obs_data_get_bool(settings, "crop_group");

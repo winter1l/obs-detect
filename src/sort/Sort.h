@@ -114,8 +114,8 @@ private:
 	float screenArea = 0.0f;
 	float ghostRecoveryMultiplier = 2.0f;
 	size_t ghostRecoveryMaxUnseen = 3;
-	float kalmanMinNoise = 0.3f;
-	float kalmanAreaThreshold = 0.1f;
+	float kalmanMinNoise = 0.35f;
+	float kalmanAreaThreshold = 0.0f;
 };
 
 #endif
