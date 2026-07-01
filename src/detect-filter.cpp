@@ -2036,8 +2036,8 @@ static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R, const StateHistor
 		}
 	}
 
-	// 3. 최초 등장 시 역방향 마스킹 처리 (T-2 ~ T 보완)
-	if (will_be_confirmed && (first_active_future_frame > R) && (first_active_future_frame - R <= 2) && (!exists_now || !current_state.is_confirmed)) {
+	// 3. 최초 등장 시 역방향 마스킹 처리 (선제 마스킹, 최대 10프레임 앞서서 작동)
+	if (will_be_confirmed && (first_active_future_frame > R) && (first_active_future_frame - R <= 10) && (!exists_now || !current_state.is_confirmed)) {
 		TrackedObjectState future_active_state;
 		if (historyManager->get_object_state(first_active_future_frame, object_id, future_active_state)) {
 			out_mode = "Reverse Masking";
