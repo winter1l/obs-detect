@@ -234,8 +234,8 @@ std::vector<Object> Sort::update(uint64_t frameId, const std::vector<Object> &de
 
 			trackedObjects[i].rect.x += dx;
 			trackedObjects[i].rect.y += dy;
-			trackedObjects[i].rect.width = std::max(5.0f, trackedObjects[i].rect.width + dw);
-			trackedObjects[i].rect.height = std::max(5.0f, trackedObjects[i].rect.height + dh);
+			trackedObjects[i].rect.width += dw;
+			trackedObjects[i].rect.height += dh;
 			predict(trackedObjects[i].kf); // update internal KF state
 		} else {
 			predict(trackedObjects[i].kf); // update internal KF state but keep rect stationary
@@ -308,6 +308,32 @@ std::vector<Object> Sort::update(uint64_t frameId, const std::vector<Object> &de
 	// Global secondary spatial matching (Ghost Recovery) for all tracks that went missing
 	for (size_t i = 0; i < trackedObjects.size(); ++i) {
 		if (trackedObjectUsed[i]) continue;
+		
+		// Check if the object is exiting the screen
+		bool is_exiting = false;
+		if (trackedObjects[i].lastVisibleRects.size() > 1 && this->screenWidth > 0.0f && this->screenHeight > 0.0f) {
+			const auto &rects = trackedObjects[i].lastVisibleRects;
+			int n = (int)rects.size();
+			float dx = (rects.back().x - rects.front().x) / (n - 1);
+			float dy = (rects.back().y - rects.front().y) / (n - 1);
+			
+			float margin = 5.0f;
+			float left = trackedObjects[i].rect.x;
+			float top = trackedObjects[i].rect.y;
+			float right = trackedObjects[i].rect.x + trackedObjects[i].rect.width;
+			float bottom = trackedObjects[i].rect.y + trackedObjects[i].rect.height;
+
+			if ((dx < 0 && left <= margin) ||
+			    (dx > 0 && right >= this->screenWidth - margin) ||
+			    (dy < 0 && top <= margin) ||
+			    (dy > 0 && bottom >= this->screenHeight - margin)) {
+				is_exiting = true;
+			}
+		}
+		
+		if (is_exiting) {
+			continue; // Do not apply ghost recovery if the object is exiting the screen
+		}
 		
 		float best_dist = std::numeric_limits<float>::max();
 		int best_det_idx = -1;

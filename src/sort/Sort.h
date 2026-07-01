@@ -64,6 +64,12 @@ public:
 		this->screenArea = area;
 	}
 
+	void setScreenDimensions(float width, float height)
+	{
+		this->screenWidth = width;
+		this->screenHeight = height;
+	}
+
 	// Get Screen Area
 	float getScreenArea() const { return this->screenArea; }
 
@@ -113,6 +119,8 @@ private:
 	float iouThreshold = 0.3f;
 	float instantTrackAreaRatio = 0.0f;
 	float screenArea = 0.0f;
+	float screenWidth = 0.0f;
+	float screenHeight = 0.0f;
 	float ghostRecoveryMultiplier = 2.0f;
 	size_t ghostRecoveryMaxUnseen = 3;
 	float kalmanMinNoise = 0.35f;

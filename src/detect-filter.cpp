@@ -1157,6 +1157,7 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 	if (tf->sortTracking) {
 		float screenArea = (float)(imageBGRA.cols * imageBGRA.rows);
 		tf->tracker.setScreenArea(screenArea);
+		tf->tracker.setScreenDimensions((float)imageBGRA.cols, (float)imageBGRA.rows);
 		objects = tf->tracker.update(tf->inferenceFrameId, objects);
 	}
 
