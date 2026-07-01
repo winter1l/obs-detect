@@ -2061,6 +2061,7 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 				std::unique_lock<std::mutex> lock(tf->inferenceMutex, std::try_to_lock);
 				if (lock.owns_lock() && !tf->isInferencing) {
 					tf->useGpuZeroCopyCurrentFrame = true;
+					tf->inferenceFrameId = tf->currentFrameId; // Fix GPU frame id being stuck at 0
 					tf->inferenceFrameReady = true;
 					tf->inferenceCV.notify_one();
 				}
@@ -2186,7 +2187,7 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 			int num_mask_rects = 0;
 			
 			if (tf->stateHistory) {
-				std::set<int> active_ids = tf->stateHistory->get_all_active_ids(renderFrameId, renderFrameId);
+				std::set<int> active_ids = tf->stateHistory->get_all_active_ids(renderFrameId);
 				for (int id : active_ids) {
 					if (num_mask_rects >= 64) break;
 					

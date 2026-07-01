@@ -40,8 +40,8 @@ public:
 	// 과거 특정 시점부터 현재까지의 tentative 상태를 confirmed로 소급 변경
 	void retroactively_confirm(uint64_t start_frame, uint64_t end_frame, int object_id);
 
-	// 특정 구간 내 한 번이라도 등장했던 모든 고유 객체 ID 수집
-	std::set<int> get_all_active_ids(uint64_t start_frame, uint64_t end_frame) const;
+	// 특정 타겟 프레임과 가장 가까운 과거(또는 동일) 프레임의 모든 고유 객체 ID 수집
+	std::set<int> get_all_active_ids(uint64_t target_frame) const;
 
 	// 버퍼 완전 초기화 (씬 전환 등 방어)
 	void clear();
