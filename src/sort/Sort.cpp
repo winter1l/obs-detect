@@ -134,21 +134,20 @@ std::vector<Object> Sort::update(uint64_t frameId, const std::vector<Object> &de
 			if (trackedObjects[i].lastVisibleRects.size() > 1) {
 				const auto &rects = trackedObjects[i].lastVisibleRects;
 				int n = (int)rects.size();
-				float dx = (rects.back().x - rects.front().x) / (n - 1);
-				float dy = (rects.back().y - rects.front().y) / (n - 1);
-				float dw = (rects.back().width - rects.front().width) / (n - 1);
-				float dh = (rects.back().height - rects.front().height) / (n - 1);
+				float cx_back = rects.back().x + rects.back().width / 2.0f;
+				float cy_back = rects.back().y + rects.back().height / 2.0f;
+				float cx_front = rects.front().x + rects.front().width / 2.0f;
+				float cy_front = rects.front().y + rects.front().height / 2.0f;
+				float dx = (cx_back - cx_front) / (n - 1);
+				float dy = (cy_back - cy_front) / (n - 1);
 				float max_dx = trackedObjects[i].rect.width * 0.5f;
 				float max_dy = trackedObjects[i].rect.height * 0.5f;
 				dx = std::max(-max_dx, std::min(max_dx, dx));
 				dy = std::max(-max_dy, std::min(max_dy, dy));
-				dw = std::max(-max_dx, std::min(max_dx, dw));
-				dh = std::max(-max_dy, std::min(max_dy, dh));
 
 				trackedObjects[i].rect.x += dx;
 				trackedObjects[i].rect.y += dy;
-				trackedObjects[i].rect.width = std::max(5.0f, trackedObjects[i].rect.width + dw);
-				trackedObjects[i].rect.height = std::max(5.0f, trackedObjects[i].rect.height + dh);
+				// 폭(Width)과 높이(Height)는 외삽하지 않고 고정합니다.
 				predict(trackedObjects[i].kf); // update internal KF state
 			} else {
 				predict(trackedObjects[i].kf); // update internal KF state but keep rect stationary
@@ -375,6 +374,9 @@ std::vector<Object> Sort::update(uint64_t frameId, const std::vector<Object> &de
 			trackedObjects[i].kf.statePost.at<float>(3) = detections[j].rect.height;
 			trackedObjects[i].kf.statePost.copyTo(trackedObjects[i].kf.statePre);
 			
+			if (trackedObjects[i].unseenFrames > 0) {
+				trackedObjects[i].lastVisibleRects.clear();
+			}
 			trackedObjects[i].unseenFrames = 0;
 			trackedObjects[i].hitFrames++;
 			trackedObjects[i].trackingState = "Recovered";
