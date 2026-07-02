@@ -2352,6 +2352,9 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 			if (tf->stateHistory) {
 				std::set<int> active_ids = tf->stateHistory->get_all_active_ids(renderFrameId, tf->currentFrameId);
 				for (int id : active_ids) {
+					if (tf->enableFaceExclusion && tf->faceExemptIds.count(id)) {
+						continue; // 대상 얼굴로 확정된 경우 마스킹 렌더링에서 완전 제외
+					}
 					if (num_mask_rects >= 64) break;
 					
 					std::string mode_str;
