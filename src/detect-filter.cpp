@@ -1256,11 +1256,36 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 					    {"width", obj.rect.width},
 					    {"height", obj.rect.height}};
 			obj_json["id"] = obj.id;
+			
+			if (append) {
+				obj_json["state"] = {
+					{"hit_frames", obj.hitFrames},
+					{"unseen_frames", obj.unseenFrames},
+					{"is_exempt", obj.isExempt},
+					{"is_unconfirmed", obj.isUnconfirmed},
+					{"tracking_state", obj.trackingState},
+					{"custom_text", obj.customText}
+				};
+				if (!obj.kf.statePost.empty() && obj.kf.statePost.rows >= 4) {
+					obj_json["kf"] = {
+						{"x", obj.kf.statePost.at<float>(0)},
+						{"y", obj.kf.statePost.at<float>(1)},
+						{"width", obj.kf.statePost.at<float>(2)},
+						{"height", obj.kf.statePost.at<float>(3)}
+					};
+				}
+			}
 			j.push_back(obj_json);
 		}
-		std::string jsonStr = j.dump(4);
+		
+		std::string jsonStr;
 		if (append) {
-			jsonStr += "\n";
+			nlohmann::json out_j;
+			out_j["frame_id"] = tf->currentFrameId;
+			out_j["objects"] = j;
+			jsonStr = out_j.dump() + "\n";
+		} else {
+			jsonStr = j.dump(4);
 		}
 		
 		{
