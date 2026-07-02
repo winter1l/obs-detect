@@ -145,7 +145,6 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_add_bool(props, "preview", obs_module_text("Preview"));
 
 	obs_properties_add_int_slider(props, "video_delay_frames", obs_module_text("VideoDelayFrames"), 0, 5, 1);
-	obs_properties_add_int_slider(props, "lookahead_delay_frames", obs_module_text("LookaheadDelayFrames"), 10, 30, 1);
 
 	// add dropdown selection for object category selection: "All", or COCO classes
 	obs_property_t *object_category =
@@ -346,7 +345,7 @@ obs_properties_t *detect_filter_properties(void *data)
 		obs_properties_add_group(props, "sort_tracking", obs_module_text("SORTTracking"),
 					 OBS_GROUP_CHECKABLE, sort_group_props);
 
-	obs_properties_add_int(sort_group_props, "min_hit_frames", obs_module_text("MinHitFrames"), 1, 30, 1);
+	obs_properties_add_int(sort_group_props, "min_hit_frames", obs_module_text("MinHitFrames"), 1, 10, 1);
 	obs_properties_add_float_slider(sort_group_props, "iou_threshold", obs_module_text("IouThreshold"), 0.0, 1.0, 0.01);
 	obs_properties_add_float_slider(sort_group_props, "instant_track_area_ratio", obs_module_text("InstantTrackAreaRatio"), 0.0, 100.0, 0.1);
 	obs_properties_add_int(sort_group_props, "max_unseen_frames", obs_module_text("MaxUnseenFrames"), 1, 30, 1);
@@ -519,8 +518,7 @@ void detect_filter_defaults(obs_data_t *settings)
 #endif
 	obs_data_set_default_bool(settings, "sort_tracking", true);
 	obs_data_set_default_bool(settings, "show_unseen_objects", false);
-	obs_data_set_default_int(settings, "video_delay_frames", 3);
-	obs_data_set_default_int(settings, "lookahead_delay_frames", 10);
+	obs_data_set_default_int(settings, "video_delay_frames", 0);
 
 	obs_data_set_default_bool(settings, "debug_mode", false);
 	obs_data_set_default_double(settings, "face_match_threshold", 0.36);
@@ -582,7 +580,6 @@ void detect_filter_update(void *data, obs_data_t *settings)
 		std::lock_guard<std::mutex> lock(tf->audioMutex);
 		tf->resetAudio = true;
 	}
-	tf->lookaheadDelayFrames = (int)obs_data_get_int(settings, "lookahead_delay_frames");
 	tf->debugMode = obs_data_get_bool(settings, "debug_mode");
 	tf->conf_threshold = (float)obs_data_get_double(settings, "threshold");
 	tf->objectCategory = (int)obs_data_get_int(settings, "object_category");

@@ -106,7 +106,7 @@ struct filter_data {
 	gs_texrender_t *texrender;
 
 	int videoDelayFrames;
-	int lookaheadDelayFrames = 10;
+	int lookaheadDelayFrames = 20;
 	
 	std::deque<gs_texture_t*> delayedTextures;
 	std::deque<uint64_t> delayedFrameIds;
