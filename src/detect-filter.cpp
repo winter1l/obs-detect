@@ -161,36 +161,41 @@ obs_properties_t *detect_filter_properties(void *data)
 		obs_properties_add_group(props, "masking_group", obs_module_text("MaskingGroup"),
 					 OBS_GROUP_CHECKABLE, masking_group);
 
-	// add callback to show/hide masking options
-	obs_property_set_modified_callback(masking_group_prop, [](obs_properties_t *props_,
-								  obs_property_t *,
-								  obs_data_t *settings) {
-		const bool enabled = obs_data_get_bool(settings, "masking_group");
-		obs_property_t *prop = obs_properties_get(props_, "masking_type");
-		obs_property_t *masking_color = obs_properties_get(props_, "masking_color");
-		obs_property_t *masking_blur_radius =
-			obs_properties_get(props_, "masking_blur_radius");
-		obs_property_t *masking_feather =
-			obs_properties_get(props_, "masking_feather");
-		obs_property_t *masking_dilation =
-			obs_properties_get(props_, "dilation_iterations");
-
-		obs_property_set_visible(prop, enabled);
-		obs_property_set_visible(masking_color, false);
-		obs_property_set_visible(masking_blur_radius, false);
-		obs_property_set_visible(masking_feather, false);
-		obs_property_set_visible(masking_dilation, enabled);
+	auto update_masking_visibility = [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
 		std::string masking_type_value = obs_data_get_string(settings, "masking_type");
+		obs_property_t *masking_color = obs_properties_get(props_, "masking_color");
+		obs_property_t *masking_blur_radius = obs_properties_get(props_, "masking_blur_radius");
+		obs_property_t *masking_feather = obs_properties_get(props_, "masking_feather");
+		obs_property_t *masking_dilation = obs_properties_get(props_, "masking_dilate_iterations");
+		obs_property_t *masking_dynamic_expansion = obs_properties_get(props_, "masking_dynamic_expansion");
+		obs_property_t *masking_dynamic_base = obs_properties_get(props_, "masking_dynamic_expansion_base");
+		obs_property_t *masking_dynamic_ratio = obs_properties_get(props_, "masking_dynamic_expansion_ratio");
+
+		const bool masking_enabled = obs_data_get_bool(settings, "masking_group");
+		const bool dynamic_enabled = obs_data_get_bool(settings, "masking_dynamic_expansion");
+
+		if (masking_color) obs_property_set_visible(masking_color, false);
+		if (masking_blur_radius) obs_property_set_visible(masking_blur_radius, false);
+		if (masking_feather) obs_property_set_visible(masking_feather, false);
+
+		if (masking_dynamic_expansion) obs_property_set_visible(masking_dynamic_expansion, masking_enabled);
+		if (masking_dilation) obs_property_set_visible(masking_dilation, masking_enabled && !dynamic_enabled);
+		if (masking_dynamic_base) obs_property_set_visible(masking_dynamic_base, masking_enabled && dynamic_enabled);
+		if (masking_dynamic_ratio) obs_property_set_visible(masking_dynamic_ratio, masking_enabled && dynamic_enabled);
+
 		if (masking_type_value == "solid_color") {
-			obs_property_set_visible(masking_color, enabled);
+			if (masking_color) obs_property_set_visible(masking_color, masking_enabled);
 		} else if (masking_type_value == "blur" || masking_type_value == "pixelate") {
-			obs_property_set_visible(masking_blur_radius, enabled);
+			if (masking_blur_radius) obs_property_set_visible(masking_blur_radius, masking_enabled);
 		}
 		if (masking_type_value != "none") {
-			obs_property_set_visible(masking_feather, enabled);
+			if (masking_feather) obs_property_set_visible(masking_feather, masking_enabled);
 		}
 		return true;
-	});
+	};
+
+	// add callback to show/hide masking options
+	obs_property_set_modified_callback(masking_group_prop, update_masking_visibility);
 
 	// add masking options drop down selection: "None", "Solid color", "Blur", "Transparent"
 	obs_property_t *masking_type = obs_properties_add_list(masking_group, "masking_type",
@@ -215,44 +220,7 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_add_int_slider(masking_group, "masking_feather",
 				      obs_module_text("MaskingFeather"), 0, 200, 1);
 
-	// add callback to show/hide blur radius and color picker
-	auto update_masking_visibility = [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
-		std::string masking_type_value = obs_data_get_string(settings, "masking_type");
-		obs_property_t *masking_color = obs_properties_get(props_, "masking_color");
-		obs_property_t *masking_blur_radius =
-			obs_properties_get(props_, "masking_blur_radius");
-		obs_property_t *masking_feather =
-			obs_properties_get(props_, "masking_feather");
-		obs_property_t *masking_dilation =
-			obs_properties_get(props_, "masking_dilate_iterations");
-		obs_property_t *masking_dynamic_expansion =
-			obs_properties_get(props_, "masking_dynamic_expansion");
-		obs_property_t *masking_dynamic_base =
-			obs_properties_get(props_, "masking_dynamic_expansion_base");
-		obs_property_t *masking_dynamic_ratio =
-			obs_properties_get(props_, "masking_dynamic_expansion_ratio");
 
-		obs_property_set_visible(masking_color, false);
-		obs_property_set_visible(masking_blur_radius, false);
-		obs_property_set_visible(masking_feather, false);
-		const bool masking_enabled = obs_data_get_bool(settings, "masking_group");
-		const bool dynamic_enabled = obs_data_get_bool(settings, "masking_dynamic_expansion");
-
-		obs_property_set_visible(masking_dynamic_expansion, masking_enabled);
-		obs_property_set_visible(masking_dilation, masking_enabled && !dynamic_enabled);
-		if (masking_dynamic_base) obs_property_set_visible(masking_dynamic_base, masking_enabled && dynamic_enabled);
-		if (masking_dynamic_ratio) obs_property_set_visible(masking_dynamic_ratio, masking_enabled && dynamic_enabled);
-
-		if (masking_type_value == "solid_color") {
-			obs_property_set_visible(masking_color, masking_enabled);
-		} else if (masking_type_value == "blur" || masking_type_value == "pixelate") {
-			obs_property_set_visible(masking_blur_radius, masking_enabled);
-		}
-		if (masking_type_value != "none") {
-			obs_property_set_visible(masking_feather, masking_enabled);
-		}
-		return true;
-	};
 
 	obs_property_set_modified_callback(masking_type, update_masking_visibility);
 

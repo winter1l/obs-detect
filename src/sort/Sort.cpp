@@ -225,19 +225,15 @@ std::vector<Object> Sort::update(uint64_t frameId, const std::vector<Object> &de
 			int n = (int)rects.size();
 			float dx = (rects.back().x - rects.front().x) / (n - 1);
 			float dy = (rects.back().y - rects.front().y) / (n - 1);
-			float dw = (rects.back().width - rects.front().width) / (n - 1);
-			float dh = (rects.back().height - rects.front().height) / (n - 1);
 			float max_dx = trackedObjects[i].rect.width * 0.5f;
 			float max_dy = trackedObjects[i].rect.height * 0.5f;
 			dx = std::max(-max_dx, std::min(max_dx, dx));
 			dy = std::max(-max_dy, std::min(max_dy, dy));
-			dw = std::max(-max_dx, std::min(max_dx, dw));
-			dh = std::max(-max_dy, std::min(max_dy, dh));
 
 			trackedObjects[i].rect.x += dx;
 			trackedObjects[i].rect.y += dy;
-			trackedObjects[i].rect.width += dw;
-			trackedObjects[i].rect.height += dh;
+			// 폭(Width)과 높이(Height)는 외삽하지 않고 고정합니다.
+			// 크기를 외삽하면 프레임마다 크기가 선형 폭발하여 고스트 복구 반경이 비정상적으로 커지는 버그가 발생할 수 있습니다.
 			predict(trackedObjects[i].kf); // update internal KF state
 		} else {
 			predict(trackedObjects[i].kf); // update internal KF state but keep rect stationary
