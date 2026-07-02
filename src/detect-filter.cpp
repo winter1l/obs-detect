@@ -145,6 +145,7 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_add_bool(props, "preview", obs_module_text("Preview"));
 
 	obs_properties_add_int_slider(props, "video_delay_frames", obs_module_text("VideoDelayFrames"), 0, 5, 1);
+	obs_properties_add_int_slider(props, "lookahead_delay_frames", obs_module_text("LookaheadDelayFrames"), 10, 30, 1);
 
 	// add dropdown selection for object category selection: "All", or COCO classes
 	obs_property_t *object_category =
@@ -550,9 +551,9 @@ void detect_filter_defaults(obs_data_t *settings)
 #endif
 	obs_data_set_default_bool(settings, "sort_tracking", true);
 	obs_data_set_default_bool(settings, "show_unseen_objects", false);
-	obs_data_set_default_bool(settings, "preview", false);
+	obs_data_set_default_int(settings, "video_delay_frames", 3);
+	obs_data_set_default_int(settings, "lookahead_delay_frames", 10);
 
-	obs_data_set_default_int(settings, "video_delay_frames", 0);
 	obs_data_set_default_bool(settings, "debug_mode", false);
 	obs_data_set_default_double(settings, "face_match_threshold", 0.36);
 	obs_data_set_default_double(settings, "min_face_area_ratio", 2.0);
@@ -563,9 +564,8 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "enable_similarity_log", false);
 	obs_data_set_default_bool(settings, "show_yunet_detections", false);
 	obs_data_set_default_string(settings, "face_stats_log_path", "");
-	obs_data_set_default_int(settings, "person_category", 0);
+	
 	obs_data_set_default_int(settings, "max_unseen_frames", 10);
-	obs_data_set_default_bool(settings, "show_unseen_objects", true);
 	obs_data_set_default_int(settings, "numThreads", 1);
 	obs_data_set_default_bool(settings, "preview", true);
 	obs_data_set_default_double(settings, "threshold", 0.5);
@@ -573,9 +573,7 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "object_category", -1);
 	obs_data_set_default_bool(settings, "enable_face_exclusion", false);
 	obs_data_set_default_string(settings, "reference_face_path", "");
-	obs_data_set_default_double(settings, "face_match_threshold", 0.36);
 	obs_data_set_default_int(settings, "person_category", -1);
-	obs_data_set_default_double(settings, "min_face_area_ratio", 30.0);
 	obs_data_set_default_int(settings, "face_inference_interval", 30);
 	obs_data_set_default_bool(settings, "masking_group", false);
 	obs_data_set_default_string(settings, "masking_type", "none");
@@ -616,6 +614,7 @@ void detect_filter_update(void *data, obs_data_t *settings)
 		std::lock_guard<std::mutex> lock(tf->audioMutex);
 		tf->resetAudio = true;
 	}
+	tf->lookaheadDelayFrames = (int)obs_data_get_int(settings, "lookahead_delay_frames");
 	tf->debugMode = obs_data_get_bool(settings, "debug_mode");
 	tf->conf_threshold = (float)obs_data_get_double(settings, "threshold");
 	tf->objectCategory = (int)obs_data_get_int(settings, "object_category");
@@ -2000,7 +1999,7 @@ static cv::Rect2f scaleBoundingBox(const cv::Rect2f& rect, float scale) {
 }
 
 // 렌더링 스레드에서 특정 프레임 R을 그릴 때 호출하는 마스크 도출 함수
-static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R, const StateHistoryManager* historyManager, uint64_t current_realtime_T, std::string& out_mode) {
+static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R, const StateHistoryManager* historyManager, uint64_t current_realtime_T, int lookaheadDelayFrames, std::string& out_mode) {
 	if (!historyManager) {
 		out_mode = "None";
 		return cv::Rect2f(0, 0, 0, 0);
@@ -2037,12 +2036,74 @@ static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R, const StateHistor
 		}
 	}
 
-	// 3. 최초 등장 시 역방향 마스킹 처리 (선제 마스킹, 최대 10프레임 앞서서 작동)
-	if (will_be_confirmed && (first_active_future_frame > R) && (first_active_future_frame - R <= 10) && (!exists_now || !current_state.is_confirmed)) {
+	// 3. 최초 등장 시 역방향 마스킹 처리 (선제 마스킹, 설정된 룩어헤드 프레임 수만큼 앞서서 작동)
+	if (will_be_confirmed && (first_active_future_frame > R) && (first_active_future_frame - R <= (uint64_t)lookaheadDelayFrames) && (!exists_now || !current_state.is_confirmed)) {
 		TrackedObjectState future_active_state;
 		if (historyManager->get_object_state(first_active_future_frame, object_id, future_active_state)) {
 			out_mode = "Reverse Masking";
-			return scaleBoundingBox(future_active_state.rect, 1.2f);
+			
+			// 역방향 선형 외삽을 위한 2번째 미래 프레임 탐색
+			TrackedObjectState next_future_state;
+			bool has_next = false;
+			uint64_t next_frame = first_active_future_frame;
+			
+			// first_active_future_frame 이후의 프레임을 버퍼에서 찾음
+			for (auto it = buffer.rbegin(); it != buffer.rend(); ++it) {
+				if (it->frame_id > first_active_future_frame) {
+					auto obj_it = it->objects.find(object_id);
+					if (obj_it != it->objects.end() && obj_it->second.is_confirmed) {
+						next_future_state = obj_it->second;
+						next_frame = it->frame_id;
+						has_next = true;
+						// 가장 가까운 미래 하나만 찾으면 되지만, 너무 가까우면 dx가 부정확할 수 있으므로
+						// 1~2 프레임 뒤의 것을 찾도록 놔둡니다. rbegin()부터 순회하므로, 처음 만나는 것은 가장 최신 프레임입니다.
+						// 따라서 정방향 순회(begin)로 바꾸어 탐색하는 것이 좋습니다.
+					}
+				}
+			}
+			
+			// 가장 가까운 미래(F 이후)를 찾기 위해 begin()부터 탐색
+			for (auto it = buffer.begin(); it != buffer.end(); ++it) {
+				if (it->frame_id > first_active_future_frame) {
+					auto obj_it = it->objects.find(object_id);
+					if (obj_it != it->objects.end() && obj_it->second.is_confirmed && !obj_it->second.is_extrapolated) {
+						next_future_state = obj_it->second;
+						next_frame = it->frame_id;
+						has_next = true;
+						break; // 가장 가까운 미래(F 이후 첫 프레임)에서 멈춤
+					}
+				}
+			}
+
+			if (has_next && next_frame > first_active_future_frame) {
+				// 속도 벡터 계산 (픽셀 / 프레임)
+				float dt = static_cast<float>(next_frame - first_active_future_frame);
+				float dx = (next_future_state.rect.x - future_active_state.rect.x) / dt;
+				float dy = (next_future_state.rect.y - future_active_state.rect.y) / dt;
+				float dw = (next_future_state.rect.width - future_active_state.rect.width) / dt;
+				float dh = (next_future_state.rect.height - future_active_state.rect.height) / dt;
+				
+				// 속도 너무 빠른 튀는 값 방지 제한
+				float max_dx = future_active_state.rect.width * 0.5f;
+				float max_dy = future_active_state.rect.height * 0.5f;
+				dx = std::max(-max_dx, std::min(max_dx, dx));
+				dy = std::max(-max_dy, std::min(max_dy, dy));
+				dw = std::max(-max_dx, std::min(max_dx, dw));
+				dh = std::max(-max_dy, std::min(max_dy, dh));
+				
+				// 역방향 외삽 적용 (시간차 F - R)
+				float time_diff = static_cast<float>(first_active_future_frame - R);
+				cv::Rect2f extrapolated_rect;
+				extrapolated_rect.x = future_active_state.rect.x - (dx * time_diff);
+				extrapolated_rect.y = future_active_state.rect.y - (dy * time_diff);
+				extrapolated_rect.width = future_active_state.rect.width - (dw * time_diff);
+				extrapolated_rect.height = future_active_state.rect.height - (dh * time_diff);
+				
+				return scaleBoundingBox(extrapolated_rect, 1.2f);
+			} else {
+				// 다음 프레임이 없으면 기존처럼 제자리 확대 적용
+				return scaleBoundingBox(future_active_state.rect, 1.2f);
+			}
 		}
 	}
 
@@ -2281,7 +2342,7 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 				std::set<int> active_ids = tf->stateHistory->get_all_active_ids(renderFrameId, tf->currentFrameId);
 				for (int id : active_ids) {
 					std::string mode_str;
-					cv::Rect2f rect = getFinalRenderBox(id, renderFrameId, tf->stateHistory.get(), tf->currentFrameId, mode_str);
+					cv::Rect2f rect = getFinalRenderBox(id, renderFrameId, tf->stateHistory.get(), tf->currentFrameId, tf->lookaheadDelayFrames, mode_str);
 					if (rect.width > 0 && rect.height > 0) {
 						std::string text = "[" + mode_str + "]";
 						cv::Scalar color(0, 255, 255, 255); // Yellow
@@ -2321,7 +2382,7 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 					if (num_mask_rects >= 64) break;
 					
 					std::string mode_str;
-					cv::Rect2f rect = getFinalRenderBox(id, renderFrameId, tf->stateHistory.get(), tf->currentFrameId, mode_str);
+					cv::Rect2f rect = getFinalRenderBox(id, renderFrameId, tf->stateHistory.get(), tf->currentFrameId, tf->lookaheadDelayFrames, mode_str);
 					
 					if (rect.width > 0 && rect.height > 0 && mode_str != "Ghost") {
 						float expansion = 0.0f;
