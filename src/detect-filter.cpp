@@ -849,12 +849,16 @@ void detect_filter_update(void *data, obs_data_t *settings)
 				MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, sface_raw, -1, s_wstr.data(), s_len);
 				
 				std::lock_guard<std::mutex> lock(tf->faceInferenceMutex);
-				tf->yunetModel = std::make_shared<yunet::YuNetONNX>(y_wstr, 1, 50, 1, "cpu", 0, false, 0.45f, 0.5f);
-				tf->sfaceModel = std::make_shared<sface::SFaceONNX>(s_wstr, 1, 1, "cpu", 0, false);
+				if (!tf->yunetModel || !tf->sfaceModel) {
+					tf->yunetModel = std::make_shared<yunet::YuNetONNX>(y_wstr, 1, 50, 1, "cpu", 0, false, 0.45f, 0.5f);
+					tf->sfaceModel = std::make_shared<sface::SFaceONNX>(s_wstr, 1, 1, "cpu", 0, false);
+				}
 #else
 				std::lock_guard<std::mutex> lock(tf->faceInferenceMutex);
-				tf->yunetModel = std::make_shared<yunet::YuNetONNX>(std::string(yunet_raw), 1, 50, 1, "cpu", 0, false, 0.45f, 0.5f);
-				tf->sfaceModel = std::make_shared<sface::SFaceONNX>(std::string(sface_raw), 1, 1, "cpu", 0, false);
+				if (!tf->yunetModel || !tf->sfaceModel) {
+					tf->yunetModel = std::make_shared<yunet::YuNetONNX>(std::string(yunet_raw), 1, 50, 1, "cpu", 0, false, 0.45f, 0.5f);
+					tf->sfaceModel = std::make_shared<sface::SFaceONNX>(std::string(sface_raw), 1, 1, "cpu", 0, false);
+				}
 #endif
 			}
 			if (yunet_raw) bfree(yunet_raw);
@@ -864,7 +868,8 @@ void detect_filter_update(void *data, obs_data_t *settings)
 			{
 				std::lock_guard<std::mutex> lock(tf->faceInferenceMutex);
 				if (!tf->referenceFacePath.empty() && tf->yunetModel && tf->sfaceModel) {
-					if (reinitialize || refPathChanged || tf->referenceFaceFeatures.empty()) {
+					if (reinitialize || refPathChanged || (!tf->referenceFacesAttempted && tf->referenceFaceFeatures.empty())) {
+						tf->referenceFacesAttempted = true;
 						tf->referenceFaceFeatures.clear();
 #ifdef _WIN32
 						int p_len = MultiByteToWideChar(CP_UTF8, 0, tf->referenceFacePath.c_str(), -1, nullptr, 0);
@@ -941,6 +946,7 @@ void detect_filter_update(void *data, obs_data_t *settings)
 		tf->yunetModel.reset();
 		tf->sfaceModel.reset();
 		tf->referenceFaceFeatures.clear();
+		tf->referenceFacesAttempted = false;
 		tf->faceStatusCache.clear();
 		tf->faceSimilarityCache.clear();
 		tf->faceExemptIds.clear();

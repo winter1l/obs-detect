@@ -52,6 +52,7 @@ struct filter_data {
 	std::unordered_map<uint64_t, FaceStatus> faceStatusCache;
 	std::unordered_map<uint64_t, float> faceSimilarityCache;
 	std::vector<std::vector<float>> referenceFaceFeatures;
+	bool referenceFacesAttempted = false;
 
 	gs_texture_t *previewTexture = nullptr;
 	gs_texture_t *renderMaskTexture = nullptr;
