@@ -91,6 +91,7 @@ struct filter_data {
 	float statSumSimilarity = 0.0f;
 	int similarityHistogram[10] = {0};
 	std::string saveDetectionsPath;
+	bool saveDetectionsAppend;
 	bool crop_enabled;
 	int crop_left;
 	int crop_right;

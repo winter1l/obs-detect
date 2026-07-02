@@ -490,6 +490,7 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_add_bool(debug_group_props, "enable_similarity_log", obs_module_text("EnableSimilarityLog"));
 	obs_properties_add_path(debug_group_props, "face_stats_log_path", obs_module_text("SaveFaceStatsCSVPath"), OBS_PATH_FILE_SAVE, "CSV file (*.csv);;All files (*.*)", nullptr);
 	obs_properties_add_path(debug_group_props, "save_detections_path", obs_module_text("SaveDetectionsPath"), OBS_PATH_FILE_SAVE, "JSON file (*.json);;All files (*.*)", nullptr);
+	obs_properties_add_bool(debug_group_props, "save_detections_append", obs_module_text("SaveDetectionsAppend"));
 
 	obs_property_set_modified_callback(enable_face_stats_log, [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
 		const bool enabled = obs_data_get_bool(settings, "enable_face_stats_log");
@@ -557,6 +558,7 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_double(settings, "zoom_speed_factor", 0.05);
 	obs_data_set_default_string(settings, "zoom_object", "single");
 	obs_data_set_default_string(settings, "save_detections_path", "");
+	obs_data_set_default_bool(settings, "save_detections_append", false);
 	obs_data_set_default_bool(settings, "crop_group", false);
 	obs_data_set_default_int(settings, "crop_left", 0);
 	obs_data_set_default_int(settings, "crop_right", 0);
@@ -618,6 +620,7 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	tf->tracker.setKalmanAreaThreshold(0.0f);
 	tf->showUnseenObjects = obs_data_get_bool(settings, "show_unseen_objects");
 	tf->saveDetectionsPath = obs_data_get_string(settings, "save_detections_path");
+	tf->saveDetectionsAppend = obs_data_get_bool(settings, "save_detections_append");
 	tf->crop_enabled = obs_data_get_bool(settings, "crop_group");
 	tf->crop_left = (int)obs_data_get_int(settings, "crop_left");
 	tf->crop_right = (int)obs_data_get_int(settings, "crop_right");
@@ -1242,10 +1245,11 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 
 	if (!tf->saveDetectionsPath.empty()) {
 		std::string savePath = tf->saveDetectionsPath;
+		bool append = tf->saveDetectionsAppend;
 		nlohmann::json j;
-		for (const Object &obj : objects) {
+		for (Object &obj : all_objects) {
 			nlohmann::json obj_json;
-			obj_json["label"] = obj.label;
+			obj_json["label"] = tf->classNames[obj.label];
 			obj_json["confidence"] = obj.prob;
 			obj_json["rect"] = {{"x", obj.rect.x},
 					    {"y", obj.rect.y},
@@ -1255,11 +1259,19 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 			j.push_back(obj_json);
 		}
 		std::string jsonStr = j.dump(4);
+		if (append) {
+			jsonStr += "\n";
+		}
 		
 		{
 			std::lock_guard<std::mutex> lock(tf->ioMutex);
-			tf->ioQueue.push_back([savePath, jsonStr]() {
-				std::ofstream detectionsFile(savePath);
+			tf->ioQueue.push_back([savePath, append, jsonStr]() {
+				std::ios_base::openmode mode = append ? std::ios_base::app : std::ios_base::out;
+#if defined(_WIN32) && (defined(_MSVC_LANG) && _MSVC_LANG >= 201703L)
+				std::ofstream detectionsFile(std::filesystem::u8path(savePath), mode);
+#else
+				std::ofstream detectionsFile(savePath, mode);
+#endif
 				if (detectionsFile.is_open()) {
 					detectionsFile << jsonStr;
 					detectionsFile.close();
