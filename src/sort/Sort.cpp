@@ -223,8 +223,12 @@ std::vector<Object> Sort::update(uint64_t frameId, const std::vector<Object> &de
 		if (trackedObjects[i].lastVisibleRects.size() > 1) {
 			const auto &rects = trackedObjects[i].lastVisibleRects;
 			int n = (int)rects.size();
-			float dx = (rects.back().x - rects.front().x) / (n - 1);
-			float dy = (rects.back().y - rects.front().y) / (n - 1);
+			float cx_back = rects.back().x + rects.back().width / 2.0f;
+			float cy_back = rects.back().y + rects.back().height / 2.0f;
+			float cx_front = rects.front().x + rects.front().width / 2.0f;
+			float cy_front = rects.front().y + rects.front().height / 2.0f;
+			float dx = (cx_back - cx_front) / (n - 1);
+			float dy = (cy_back - cy_front) / (n - 1);
 			float max_dx = trackedObjects[i].rect.width * 0.5f;
 			float max_dy = trackedObjects[i].rect.height * 0.5f;
 			dx = std::max(-max_dx, std::min(max_dx, dx));
@@ -312,8 +316,12 @@ std::vector<Object> Sort::update(uint64_t frameId, const std::vector<Object> &de
 		if (trackedObjects[i].lastVisibleRects.size() > 1 && this->screenWidth > 0.0f && this->screenHeight > 0.0f) {
 			const auto &rects = trackedObjects[i].lastVisibleRects;
 			int n = (int)rects.size();
-			float dx = (rects.back().x - rects.front().x) / (n - 1);
-			float dy = (rects.back().y - rects.front().y) / (n - 1);
+			float cx_back = rects.back().x + rects.back().width / 2.0f;
+			float cy_back = rects.back().y + rects.back().height / 2.0f;
+			float cx_front = rects.front().x + rects.front().width / 2.0f;
+			float cy_front = rects.front().y + rects.front().height / 2.0f;
+			float dx = (cx_back - cx_front) / (n - 1);
+			float dy = (cy_back - cy_front) / (n - 1);
 			
 			float margin = 5.0f;
 			float left = trackedObjects[i].rect.x;
