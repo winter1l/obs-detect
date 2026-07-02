@@ -142,8 +142,6 @@ obs_properties_t *detect_filter_properties(void *data)
 
 	obs_properties_t *props = obs_properties_create();
 
-	obs_properties_add_bool(props, "preview", obs_module_text("Preview"));
-
 	obs_properties_add_int_slider(props, "video_delay_frames", obs_module_text("VideoDelayFrames"), 0, 5, 1);
 
 	// add dropdown selection for object category selection: "All", or COCO classes
@@ -151,6 +149,12 @@ obs_properties_t *detect_filter_properties(void *data)
 		obs_properties_add_list(props, "object_category", obs_module_text("ObjectCategory"),
 					OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
 	set_class_names_on_object_category(object_category, edgeyolo_cpp::COCO_CLASSES);
+
+	// add threshold slider
+	obs_properties_add_float_slider(props, "threshold", obs_module_text("ConfThreshold"), 0.10,
+					1.0, 0.025);
+	obs_properties_add_int_slider(props, "min_size_threshold",
+				      obs_module_text("MinSizeThreshold"), 0, 10000, 1);
 
 	tf->classNames = edgeyolo_cpp::COCO_CLASSES;
 
@@ -234,7 +238,7 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_add_float_slider(masking_group, "masking_dynamic_expansion_base",
 					obs_module_text("MaskingDynamicExpansionBase"), 0.0, 100.0, 1.0);
 	obs_properties_add_float_slider(masking_group, "masking_dynamic_expansion_ratio",
-					obs_module_text("MaskingDynamicExpansionRatio"), 0.0, 2.0, 0.05);
+					obs_module_text("MaskingDynamicExpansionRatio"), 0.0, 1.0, 0.01);
 
 	// add options group for tracking and zoom-follow options
 	obs_properties_t *tracking_group_props = obs_properties_create();
@@ -300,19 +304,9 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_add_int_slider(crop_group_props, "crop_bottom",
 				      obs_module_text("CropBottom"), 0, 1000, 1);
 
-	// add a text input for the currently detected object
-	obs_property_t *detected_obj_prop = obs_properties_add_text(
-		props, "detected_object", obs_module_text("DetectedObject"), OBS_TEXT_DEFAULT);
-	// disable the text input by default
-	obs_property_set_enabled(detected_obj_prop, false);
-
-	// add threshold slider
-	obs_properties_add_float_slider(props, "threshold", obs_module_text("ConfThreshold"), 0.10,
-					1.0, 0.025);
-
-	obs_properties_add_int_slider(props, "min_size_threshold",
-				      obs_module_text("MinSizeThreshold"), 0, 10000, 1);
 	// Face Exclusion Group
+	obs_property_t *face_ex_sep = obs_properties_add_text(props, "face_ex_separator", "--------------------------------------------------", OBS_TEXT_DEFAULT);
+	obs_property_set_enabled(face_ex_sep, false);
 	obs_properties_t *face_ex_group_props = obs_properties_create();
 	obs_property_t *enable_face_exclusion =
 		obs_properties_add_group(props, "enable_face_exclusion", obs_module_text("EnableFaceExclusion"),
@@ -326,8 +320,8 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_add_path(face_ex_group_props, "reference_face_path", obs_module_text("ReferenceFaceImage"), OBS_PATH_DIRECTORY, "", nullptr);
 	obs_properties_add_float_slider(face_ex_group_props, "face_match_threshold", obs_module_text("FaceMatchThreshold"), 0.0, 1.0, 0.01);
 	obs_properties_add_float_slider(face_ex_group_props, "min_face_area_ratio", obs_module_text("MinFaceAreaRatio"), 0.0, 100.0, 0.1);
-	obs_properties_add_int_slider(face_ex_group_props, "face_inference_interval", obs_module_text("FaceInferenceInterval"), 1, 120, 1);
-	obs_properties_add_int_slider(face_ex_group_props, "max_exempt_persons", obs_module_text("MaxExemptPersons"), 1, 10, 1);
+	obs_properties_add_int_slider(face_ex_group_props, "face_inference_interval", obs_module_text("FaceInferenceInterval"), 1, 60, 1);
+	obs_properties_add_int_slider(face_ex_group_props, "max_exempt_persons", obs_module_text("MaxExemptPersons"), 0, 10, 1);
 
 	// Hide subproperties completely when unchecked
 	obs_property_set_modified_callback(enable_face_exclusion, [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
@@ -346,22 +340,17 @@ obs_properties_t *detect_filter_properties(void *data)
 					 OBS_GROUP_CHECKABLE, sort_group_props);
 
 	obs_properties_add_int(sort_group_props, "min_hit_frames", obs_module_text("MinHitFrames"), 1, 10, 1);
-	obs_properties_add_float_slider(sort_group_props, "iou_threshold", obs_module_text("IouThreshold"), 0.0, 1.0, 0.01);
+	obs_properties_add_float_slider(sort_group_props, "iou_threshold", obs_module_text("IouThreshold"), 0.01, 1.0, 0.01);
 	obs_properties_add_float_slider(sort_group_props, "instant_track_area_ratio", obs_module_text("InstantTrackAreaRatio"), 0.0, 100.0, 0.1);
 	obs_properties_add_int(sort_group_props, "max_unseen_frames", obs_module_text("MaxUnseenFrames"), 1, 30, 1);
-	obs_properties_add_bool(sort_group_props, "show_unseen_objects", obs_module_text("ShowUnseenObjects"));
-	obs_properties_add_float_slider(sort_group_props, "ghost_recovery_multiplier", obs_module_text("GhostRecoveryMultiplier"), 0.5, 5.0, 0.1);
-	obs_properties_add_int(sort_group_props, "ghost_recovery_max_unseen", obs_module_text("GhostRecoveryMaxUnseen"), 1, 15, 1);
+	obs_properties_add_float_slider(sort_group_props, "ghost_recovery_multiplier", obs_module_text("GhostRecoveryMultiplier"), 1.0, 5.0, 0.1);
 
 	// Hide subproperties completely when unchecked
 	obs_property_set_modified_callback(sort_tracking, [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
 		const bool enabled = obs_data_get_bool(settings, "sort_tracking");
-		for (auto prop_name : {"min_hit_frames", "iou_threshold", "instant_track_area_ratio", "max_unseen_frames", "show_unseen_objects", "ghost_recovery_multiplier", "ghost_recovery_max_unseen"}) {
+		for (auto prop_name : {"min_hit_frames", "iou_threshold", "instant_track_area_ratio", "max_unseen_frames", "ghost_recovery_multiplier"}) {
 			obs_property_t *prop = obs_properties_get(props_, prop_name);
 			if (prop) obs_property_set_visible(prop, enabled);
-		}
-		if (!enabled) {
-			obs_data_set_bool(settings, "show_unseen_objects", true);
 		}
 		return true;
 	});
@@ -480,22 +469,23 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_t *debug_group_props = obs_properties_create();
 	obs_properties_add_group(props, "debug_group", obs_module_text("DebugGroup"), OBS_GROUP_NORMAL, debug_group_props);
 
+	obs_properties_add_bool(debug_group_props, "preview", obs_module_text("Preview"));
+	
+	obs_property_t *detected_obj_prop = obs_properties_add_text(
+		debug_group_props, "detected_object", obs_module_text("DetectedObject"), OBS_TEXT_DEFAULT);
+	obs_property_set_enabled(detected_obj_prop, false);
+
 	obs_properties_add_bool(debug_group_props, "debug_mode", obs_module_text("DebugMode"));
 	obs_properties_add_bool(debug_group_props, "enable_face_stats", obs_module_text("ShowFaceSimilarityStats"));
-	
 	obs_properties_add_bool(debug_group_props, "show_yunet_detections", obs_module_text("ShowYuNetDetections"));
-	
-	obs_property_t *enable_face_stats_log = obs_properties_add_bool(debug_group_props, "enable_face_stats_log", obs_module_text("SaveFaceStatsToCSV"));
 	obs_properties_add_bool(debug_group_props, "enable_similarity_log", obs_module_text("EnableSimilarityLog"));
-	obs_properties_add_path(debug_group_props, "face_stats_log_path", obs_module_text("SaveFaceStatsCSVPath"), OBS_PATH_FILE_SAVE, "CSV file (*.csv);;All files (*.*)", nullptr);
-	obs_properties_add_path(debug_group_props, "save_detections_path", obs_module_text("SaveDetectionsPath"), OBS_PATH_FILE, "*.json", NULL);
-
-	obs_property_set_modified_callback(enable_face_stats_log, [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
-		const bool enabled = obs_data_get_bool(settings, "enable_face_stats_log");
-		obs_property_t *prop = obs_properties_get(props_, "face_stats_log_path");
-		if (prop) obs_property_set_visible(prop, enabled);
-		return true;
+	
+	obs_properties_add_button(debug_group_props, "open_obs_logs", "OBS 로그 폴더 열기", [](obs_properties_t *, obs_property_t *, void *) {
+		system("explorer %appdata%\\obs-studio\\logs");
+		return false;
 	});
+
+	obs_properties_add_path(debug_group_props, "save_detections_path", obs_module_text("SaveDetectionsPath"), OBS_PATH_FILE, "*.json", NULL);
 
 	// Add a informative text about the plugin
 	std::string basic_info =
@@ -521,8 +511,8 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "video_delay_frames", 0);
 
 	obs_data_set_default_bool(settings, "debug_mode", false);
-	obs_data_set_default_double(settings, "face_match_threshold", 0.36);
-	obs_data_set_default_double(settings, "min_face_area_ratio", 2.0);
+	obs_data_set_default_double(settings, "face_match_threshold", 0.6);
+	obs_data_set_default_double(settings, "min_face_area_ratio", 19.0);
 	obs_data_set_default_int(settings, "face_inference_interval", 30);
 	obs_data_set_default_int(settings, "max_exempt_persons", 1);
 	obs_data_set_default_bool(settings, "enable_face_stats", false);
@@ -531,12 +521,12 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "show_yunet_detections", false);
 	obs_data_set_default_string(settings, "face_stats_log_path", "");
 	
-	obs_data_set_default_int(settings, "max_unseen_frames", 10);
+	obs_data_set_default_int(settings, "max_unseen_frames", 15);
 	obs_data_set_default_int(settings, "numThreads", 1);
 	obs_data_set_default_bool(settings, "preview", true);
-	obs_data_set_default_double(settings, "threshold", 0.5);
+	obs_data_set_default_double(settings, "threshold", 0.45);
 	obs_data_set_default_string(settings, "model_size", "small");
-	obs_data_set_default_int(settings, "object_category", -1);
+	obs_data_set_default_int(settings, "object_category", 0);
 	obs_data_set_default_bool(settings, "enable_face_exclusion", false);
 	obs_data_set_default_string(settings, "reference_face_path", "");
 	obs_data_set_default_int(settings, "person_category", -1);
@@ -544,11 +534,12 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "masking_group", false);
 	obs_data_set_default_string(settings, "masking_type", "none");
 	obs_data_set_default_string(settings, "masking_color", "#000000");
-	obs_data_set_default_int(settings, "masking_feather", 0);
+	obs_data_set_default_int(settings, "masking_blur_radius", 10);
+	obs_data_set_default_int(settings, "masking_feather", 30);
 	obs_data_set_default_int(settings, "masking_dilate_iterations", 0);
 	obs_data_set_default_bool(settings, "masking_dynamic_expansion", false);
-	obs_data_set_default_double(settings, "masking_dynamic_expansion_base", 10.0);
-	obs_data_set_default_double(settings, "masking_dynamic_expansion_ratio", 0.2);
+	obs_data_set_default_double(settings, "masking_dynamic_expansion_base", 1.0);
+	obs_data_set_default_double(settings, "masking_dynamic_expansion_ratio", 0.05);
 	obs_data_set_default_int(settings, "dilation_iterations", 0);
 	obs_data_set_default_bool(settings, "tracking_group", false);
 	obs_data_set_default_double(settings, "zoom_factor", 0.0);
@@ -560,8 +551,12 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "crop_right", 0);
 	obs_data_set_default_int(settings, "crop_top", 0);
 	obs_data_set_default_int(settings, "crop_bottom", 0);
-	obs_data_set_default_double(settings, "ghost_recovery_multiplier", 2.0);
-	obs_data_set_default_int(settings, "ghost_recovery_max_unseen", 3);
+	obs_data_set_default_int(settings, "min_size_threshold", 3000);
+	obs_data_set_default_double(settings, "ghost_recovery_multiplier", 1.8);
+	obs_data_set_default_int(settings, "ghost_recovery_max_unseen", 6);
+	obs_data_set_default_int(settings, "min_hit_frames", 7);
+	obs_data_set_default_double(settings, "iou_threshold", 0.20);
+	obs_data_set_default_double(settings, "instant_track_area_ratio", 4.0);
 }
 
 void detect_filter_update(void *data, obs_data_t *settings)
@@ -613,7 +608,7 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	
 	tf->tracker.setKalmanMinNoise(0.35f);
 	tf->tracker.setKalmanAreaThreshold(0.0f);
-	tf->showUnseenObjects = obs_data_get_bool(settings, "show_unseen_objects");
+	tf->showUnseenObjects = true;
 	tf->saveDetectionsPath = obs_data_get_string(settings, "save_detections_path");
 	tf->crop_enabled = obs_data_get_bool(settings, "crop_group");
 	tf->crop_left = (int)obs_data_get_int(settings, "crop_left");
@@ -624,9 +619,9 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	tf->maxExemptPersons = (int)obs_data_get_int(settings, "max_exempt_persons");
 	tf->minHitFrames = (int)obs_data_get_int(settings, "min_hit_frames");
 	tf->enableFaceStats = obs_data_get_bool(settings, "enable_face_stats");
-	tf->enableFaceStatsLog = obs_data_get_bool(settings, "enable_face_stats_log");
+	tf->enableFaceStatsLog = false;
 	tf->enableSimilarityLog = obs_data_get_bool(settings, "enable_similarity_log");
-	tf->faceStatsLogPath = obs_data_get_string(settings, "face_stats_log_path");
+	tf->faceStatsLogPath = "";
 	tf->showYuNetDetections = obs_data_get_bool(settings, "show_yunet_detections");
 
 	if (tf->tracker.getMinHitFrames() != tf->minHitFrames) {
@@ -644,10 +639,7 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	if (tf->tracker.getGhostRecoveryMultiplier() != ghost_recovery_multiplier) {
 		tf->tracker.setGhostRecoveryMultiplier(ghost_recovery_multiplier);
 	}
-	int ghost_recovery_max_unseen = (int)obs_data_get_int(settings, "ghost_recovery_max_unseen");
-	if (tf->tracker.getGhostRecoveryMaxUnseen() != ghost_recovery_max_unseen) {
-		tf->tracker.setGhostRecoveryMaxUnseen(ghost_recovery_max_unseen);
-	}
+	tf->tracker.setGhostRecoveryMaxUnseen(6);
 
 	// check if tracking state has changed
 	if (tf->trackingEnabled != newTrackingEnabled) {
@@ -1161,7 +1153,7 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 				continue;
 			}
 
-			if (current_is_me_count >= tf->maxExemptPersons) {
+			if (tf->maxExemptPersons > 0 && current_is_me_count >= tf->maxExemptPersons) {
 				continue; // Max exempt persons reached, skip inference
 			}
 
