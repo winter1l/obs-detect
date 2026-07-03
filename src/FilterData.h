@@ -108,6 +108,12 @@ struct filter_data {
 
 	int videoDelayFrames;
 	int lookaheadDelayFrames = 20;
+	int preemptiveMaskingFrames = 10;
+	
+	bool tickRendered = false;
+	gs_texture_t *cachedRenderTex = nullptr;
+	uint64_t cachedRenderFrameId = 0;
+	uint64_t cachedMaskRenderFrameId = 0;
 	
 	std::deque<gs_texture_t*> delayedTextures;
 	std::deque<uint64_t> delayedFrameIds;

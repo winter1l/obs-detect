@@ -43,10 +43,10 @@
 #include "ort-model/YOLOv8FaceONNX.hpp"
 #include "yunet/YuNet.h"
 
-#define EXTERNAL_MODEL_SIZE "!!!EXTERNAL_MODEL!!!"
-#define FACE_YUNET_MODEL_SIZE "!!!FACE_YUNET!!!"
-#define FACE_YOLO_N_MODEL_SIZE "!!!FACE_YOLO_N!!!"
-#define FACE_YOLO_S_MODEL_SIZE "!!!FACE_YOLO_S!!!"
+#define EXTERNAL_MODEL_SIZE "EXTERNAL_MODEL"
+#define FACE_YUNET_MODEL_SIZE "FACE_YUNET"
+#define FACE_YOLO_N_MODEL_SIZE "FACE_YOLO_N"
+#define FACE_YOLO_S_MODEL_SIZE "FACE_YOLO_S"
 
 struct detect_filter : public filter_data {};
 
@@ -142,7 +142,7 @@ obs_properties_t *detect_filter_properties(void *data)
 
 	obs_properties_t *props = obs_properties_create();
 
-	obs_properties_add_int_slider(props, "video_delay_frames", obs_module_text("VideoDelayFrames"), 0, 5, 1);
+	obs_properties_add_int_slider(props, "video_delay_frames", obs_module_text("VideoDelayFrames"), 0, 10, 1);
 
 	// add dropdown selection for object category selection: "All", or COCO classes
 	obs_property_t *object_category =
@@ -344,7 +344,7 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_add_float_slider(sort_group_props, "instant_track_area_ratio", obs_module_text("InstantTrackAreaRatio"), 0.0, 100.0, 0.1);
 	obs_properties_add_int(sort_group_props, "max_unseen_frames", obs_module_text("MaxUnseenFrames"), 1, 30, 1);
 	obs_properties_add_float_slider(sort_group_props, "ghost_recovery_multiplier", obs_module_text("GhostRecoveryMultiplier"), 1.0, 5.0, 0.1);
-	obs_properties_add_float_slider(sort_group_props, "ghost_recovery_size_ratio_limit", obs_module_text("GhostRecoverySizeRatioLimit"), 1.1, 5.0, 0.1);
+	obs_properties_add_float_slider(sort_group_props, "ghost_recovery_size_ratio_limit", obs_module_text("GhostRecoverySizeRatioLimit"), 1.1, 3.0, 0.1);
 
 	// Hide subproperties completely when unchecked
 	obs_property_set_modified_callback(sort_tracking, [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
@@ -1163,6 +1163,25 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 		tf->tracker.setScreenArea(screenArea);
 		tf->tracker.setScreenDimensions((float)imageBGRA.cols, (float)imageBGRA.rows);
 		objects = tf->tracker.update(tf->inferenceFrameId, objects);
+	} else {
+		// SORT 트래킹이 꺼진 경우, 원시 검출 좌표들을 가짜 임시 고유 ID와 함께 히스토리에 수동으로 기록합니다.
+		if (tf->stateHistory) {
+			std::map<int, TrackedObjectState> current_frame_states;
+			int temp_id = 1;
+			for (auto &obj : objects) {
+				obj.id = temp_id++;
+				
+				TrackedObjectState state;
+				state.id = (int)obj.id;
+				state.rect = obj.rect;
+				state.is_confirmed = true;
+				state.is_extrapolated = false;
+				state.hit_streak = 1;
+				
+				current_frame_states[(int)obj.id] = state;
+			}
+			tf->stateHistory->push_frame_state(tf->inferenceFrameId, current_frame_states);
+		}
 	}
 
 	std::vector<Object> all_objects; // for preview
@@ -1854,6 +1873,7 @@ void detect_filter_video_tick(void *data, float seconds)
 	UNUSED_PARAMETER(seconds);
 
 	struct detect_filter *tf = reinterpret_cast<detect_filter *>(data);
+	tf->tickRendered = false;
 
 	if (tf->isDisabled || !tf->onnxruntimemodel || !obs_source_enabled(tf->source)) {
 		return;
@@ -2009,7 +2029,7 @@ static cv::Rect2f scaleBoundingBox(const cv::Rect2f& rect, float scale) {
 }
 
 // 렌더링 스레드에서 특정 프레임 R을 그릴 때 호출하는 마스크 도출 함수
-static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R, const StateHistoryManager* historyManager, uint64_t current_realtime_T, int lookaheadDelayFrames, std::string& out_mode) {
+static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R, const StateHistoryManager* historyManager, uint64_t current_realtime_T, int preemptiveMaskingFrames, std::string& out_mode) {
 	if (!historyManager) {
 		out_mode = "None";
 		return cv::Rect2f(0, 0, 0, 0);
@@ -2046,8 +2066,8 @@ static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R, const StateHistor
 		}
 	}
 
-	// 3. 최초 등장 시 역방향 마스킹 처리 (선제 마스킹, 설정된 룩어헤드 프레임 수만큼 앞서서 작동)
-	if (will_be_confirmed && (first_active_future_frame > R) && (first_active_future_frame - R <= (uint64_t)lookaheadDelayFrames) && (!exists_now || !current_state.is_confirmed)) {
+	// 3. 최초 등장 시 역방향 마스킹 처리 (선제 마스킹, 설정된 선제 마스킹 프레임 수(0.25초)만큼 앞서서 작동)
+	if (will_be_confirmed && (first_active_future_frame > R) && (first_active_future_frame - R <= (uint64_t)preemptiveMaskingFrames) && (!exists_now || !current_state.is_confirmed)) {
 		TrackedObjectState future_active_state;
 		if (historyManager->get_object_state(first_active_future_frame, object_id, future_active_state)) {
 			out_mode = "Reverse Masking";
@@ -2172,6 +2192,22 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 
 	struct detect_filter *tf = reinterpret_cast<detect_filter *>(data);
 
+	// FPS 기반 룩어헤드 및 선제 마스킹 프레임 갱신 (0.5초 / 0.25초 기준)
+	double fps = 60.0;
+	struct obs_video_info ovi;
+	if (obs_get_video_info(&ovi) && ovi.fps_den > 0) {
+		fps = (double)ovi.fps_num / (double)ovi.fps_den;
+	}
+	int newLookahead = (int)round(0.5 * fps);
+	int newPreemptive = (int)round(0.25 * fps);
+
+	if (tf->lookaheadDelayFrames != newLookahead || tf->preemptiveMaskingFrames != newPreemptive) {
+		std::lock_guard<std::mutex> lock(tf->audioMutex);
+		tf->lookaheadDelayFrames = newLookahead;
+		tf->preemptiveMaskingFrames = newPreemptive;
+		tf->resetAudio = true;
+	}
+
 	if (tf->isDisabled || !tf->onnxruntimemodel) {
 		if (tf->source) {
 			obs_source_skip_video_filter(tf->source);
@@ -2212,113 +2248,135 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 	gs_blend_state_pop();
 	gs_texrender_end(tf->texrender);
 
-	gs_texture_t *render_tex = gs_texrender_get_texture(tf->texrender);
-	bool run_gpu = false;
-
-#ifdef _WIN32
-	if (tf->useGPU == "dml" && tf->onnxruntimemodel && render_tex) {
-		if (!tf->onnxruntimemodel->is_gpu_pipeline_initialized()) {
-			ID3D11Texture2D *d3d11Tex = (ID3D11Texture2D*)gs_texture_get_obj(render_tex);
-			if (d3d11Tex) {
-				ID3D11Device *d3d11Device = nullptr;
-				d3d11Tex->GetDevice(&d3d11Device);
-				if (d3d11Device) {
-					tf->onnxruntimemodel->initialize_gpu(d3d11Device, width, height);
-					d3d11Device->Release();
-				}
-			}
-		}
-
-		if (tf->onnxruntimemodel->is_gpu_pipeline_ready()) {
-			if (tf->onnxruntimemodel->copy_d3d11_texture(render_tex)) {
-				run_gpu = true;
-
-				std::unique_lock<std::mutex> lock(tf->inferenceMutex, std::try_to_lock);
-				if (lock.owns_lock() && !tf->isInferencing) {
-					tf->useGpuZeroCopyCurrentFrame = true;
-					tf->inferenceFrameId = tf->currentFrameId; // Fix GPU frame id being stuck at 0
-					tf->inferenceFrameReady = true;
-					tf->inferenceCV.notify_one();
-				}
-			}
-		}
-	}
-#endif
-
-	if (!run_gpu) {
-		if (tf->stagesurface) {
-			uint32_t stagesurf_width = gs_stagesurface_get_width(tf->stagesurface);
-			uint32_t stagesurf_height = gs_stagesurface_get_height(tf->stagesurface);
-			if (stagesurf_width != width || stagesurf_height != height) {
-				gs_stagesurface_destroy(tf->stagesurface);
-				tf->stagesurface = nullptr;
-			}
-		}
-		if (!tf->stagesurface) {
-			tf->stagesurface = gs_stagesurface_create(width, height, GS_BGRA);
-		}
-		gs_stage_texture(tf->stagesurface, render_tex);
-		uint8_t *video_data;
-		uint32_t linesize;
-		if (gs_stagesurface_map(tf->stagesurface, &video_data, &linesize)) {
-			{
-				std::lock_guard<std::mutex> lock(tf->inputBGRALock);
-				tf->inputBGRA = cv::Mat(height, width, CV_8UC4, video_data, linesize);
-			}
-			gs_stagesurface_unmap(tf->stagesurface);
-		} else {
-			if (tf->source) {
-				obs_source_skip_video_filter(tf->source);
-			}
-			return;
-		}
-	}
-
-	// ---- VIDEO DELAY LOGIC ----
-	tf->currentFrameId++;
+	gs_texture_t *delayed_tex = nullptr;
+	uint64_t renderFrameId = 0;
+	uint64_t maskRenderFrameId = 0;
 	int totalDelay = tf->videoDelayFrames + tf->lookaheadDelayFrames;
 
-	while ((int)tf->delayedTextures.size() > totalDelay) {
-		gs_texture_t *old_tex = tf->delayedTextures.front();
-		tf->delayedTextures.pop_front();
-		tf->texturePool.push_back(old_tex);
-	}
-	while ((int)tf->delayedFrameIds.size() > totalDelay) {
-		tf->delayedFrameIds.pop_front();
-	}
+	if (!tf->tickRendered) {
+		tf->tickRendered = true;
 
-	gs_texture_t *copy_tex = nullptr;
-	if (totalDelay > 0) {
-		for (auto it = tf->texturePool.begin(); it != tf->texturePool.end(); ++it) {
-			if (gs_texture_get_width(*it) == width && gs_texture_get_height(*it) == height) {
-				copy_tex = *it;
-				tf->texturePool.erase(it);
-				break;
+		gs_texture_t *render_tex = gs_texrender_get_texture(tf->texrender);
+		bool run_gpu = false;
+
+#ifdef _WIN32
+		if (tf->useGPU == "dml" && tf->onnxruntimemodel && render_tex) {
+			if (!tf->onnxruntimemodel->is_gpu_pipeline_initialized()) {
+				ID3D11Texture2D *d3d11Tex = (ID3D11Texture2D*)gs_texture_get_obj(render_tex);
+				if (d3d11Tex) {
+					ID3D11Device *d3d11Device = nullptr;
+					d3d11Tex->GetDevice(&d3d11Device);
+					if (d3d11Device) {
+						tf->onnxruntimemodel->initialize_gpu(d3d11Device, width, height);
+						d3d11Device->Release();
+					}
+				}
+			}
+
+			if (tf->onnxruntimemodel->is_gpu_pipeline_ready()) {
+				if (tf->onnxruntimemodel->copy_d3d11_texture(render_tex)) {
+					run_gpu = true;
+
+					std::unique_lock<std::mutex> lock(tf->inferenceMutex, std::try_to_lock);
+					if (lock.owns_lock() && !tf->isInferencing) {
+						tf->useGpuZeroCopyCurrentFrame = true;
+						tf->inferenceFrameId = tf->currentFrameId; // Fix GPU frame id being stuck at 0
+						tf->inferenceFrameReady = true;
+						tf->inferenceCV.notify_one();
+					}
+				}
 			}
 		}
-		if (!copy_tex) {
-			copy_tex = gs_texture_create(width, height, GS_BGRA, 1, nullptr, GS_RENDER_TARGET);
-		}
-		if (copy_tex) {
-			gs_copy_texture(copy_tex, render_tex);
-			tf->delayedTextures.push_back(copy_tex);
-			tf->delayedFrameIds.push_back(tf->currentFrameId);
-		}
-	} else {
-		for (auto tex : tf->delayedTextures) gs_texture_destroy(tex);
-		tf->delayedTextures.clear();
-		tf->delayedFrameIds.clear();
-		for (auto tex : tf->texturePool) gs_texture_destroy(tex);
-		tf->texturePool.clear();
-	}
+#endif
 
-	gs_texture_t *delayed_tex = render_tex;
-	uint64_t renderFrameId = tf->currentFrameId;
-	if (totalDelay > 0 && !tf->delayedTextures.empty()) {
-		delayed_tex = tf->delayedTextures.front();
-		renderFrameId = tf->delayedFrameIds.front();
+		if (!run_gpu) {
+			if (tf->stagesurface) {
+				uint32_t stagesurf_width = gs_stagesurface_get_width(tf->stagesurface);
+				uint32_t stagesurf_height = gs_stagesurface_get_height(tf->stagesurface);
+				if (stagesurf_width != width || stagesurf_height != height) {
+					gs_stagesurface_destroy(tf->stagesurface);
+					tf->stagesurface = nullptr;
+				}
+			}
+			if (!tf->stagesurface) {
+				tf->stagesurface = gs_stagesurface_create(width, height, GS_BGRA);
+			}
+			gs_stage_texture(tf->stagesurface, render_tex);
+			uint8_t *video_data;
+			uint32_t linesize;
+			if (gs_stagesurface_map(tf->stagesurface, &video_data, &linesize)) {
+				{
+					std::lock_guard<std::mutex> lock(tf->inputBGRALock);
+					tf->inputBGRA = cv::Mat(height, width, CV_8UC4, video_data, linesize);
+				}
+				gs_stagesurface_unmap(tf->stagesurface);
+			} else {
+				if (tf->source) {
+					obs_source_skip_video_filter(tf->source);
+				}
+				return;
+			}
+		}
+
+		// ---- VIDEO DELAY LOGIC ----
+		tf->currentFrameId++;
+
+		while ((int)tf->delayedTextures.size() > totalDelay) {
+			gs_texture_t *old_tex = tf->delayedTextures.front();
+			tf->delayedTextures.pop_front();
+			tf->texturePool.push_back(old_tex);
+		}
+		while ((int)tf->delayedFrameIds.size() > totalDelay) {
+			tf->delayedFrameIds.pop_front();
+		}
+
+		gs_texture_t *copy_tex = nullptr;
+		if (totalDelay > 0) {
+			for (auto it = tf->texturePool.begin(); it != tf->texturePool.end(); ++it) {
+				if (gs_texture_get_width(*it) == width && gs_texture_get_height(*it) == height) {
+					copy_tex = *it;
+					tf->texturePool.erase(it);
+					break;
+				}
+			}
+			if (!copy_tex) {
+				copy_tex = gs_texture_create(width, height, GS_BGRA, 1, nullptr, GS_RENDER_TARGET);
+			}
+			if (copy_tex) {
+				gs_copy_texture(copy_tex, render_tex);
+				tf->delayedTextures.push_back(copy_tex);
+				tf->delayedFrameIds.push_back(tf->currentFrameId);
+			}
+		} else {
+			for (auto tex : tf->delayedTextures) gs_texture_destroy(tex);
+			tf->delayedTextures.clear();
+			tf->delayedFrameIds.clear();
+			for (auto tex : tf->texturePool) gs_texture_destroy(tex);
+			tf->texturePool.clear();
+		}
+
+		delayed_tex = render_tex;
+		renderFrameId = tf->currentFrameId;
+		maskRenderFrameId = tf->currentFrameId;
+		if (totalDelay > 0 && !tf->delayedTextures.empty()) {
+			delayed_tex = tf->delayedTextures.front();
+			renderFrameId = tf->delayedFrameIds.front();
+			if ((int)tf->delayedFrameIds.size() > tf->videoDelayFrames) {
+				maskRenderFrameId = tf->delayedFrameIds[tf->videoDelayFrames];
+			} else {
+				maskRenderFrameId = tf->delayedFrameIds.back();
+			}
+		}
+		// ---------------------------
+
+		tf->cachedRenderTex = delayed_tex;
+		tf->cachedRenderFrameId = renderFrameId;
+		tf->cachedMaskRenderFrameId = maskRenderFrameId;
+	} else {
+		delayed_tex = tf->cachedRenderTex;
+		renderFrameId = tf->cachedRenderFrameId;
+		maskRenderFrameId = tf->cachedMaskRenderFrameId;
 	}
-	// ---------------------------
 
 	// if preview, masking, debug stats, or debug mode is enabled, render the image
 	if (tf->preview || tf->maskingEnabled || tf->debugMode || tf->enableFaceStats) {
@@ -2349,10 +2407,10 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 			outputBGRA = localOutputBGRA.clone();
 			
 			if (tf->debugMode && tf->stateHistory) {
-				std::set<int> active_ids = tf->stateHistory->get_all_active_ids(renderFrameId, tf->currentFrameId);
+				std::set<int> active_ids = tf->stateHistory->get_all_active_ids(maskRenderFrameId, tf->currentFrameId);
 				for (int id : active_ids) {
 					std::string mode_str;
-					cv::Rect2f rect = getFinalRenderBox(id, renderFrameId, tf->stateHistory.get(), tf->currentFrameId, tf->lookaheadDelayFrames, mode_str);
+					cv::Rect2f rect = getFinalRenderBox(id, maskRenderFrameId, tf->stateHistory.get(), tf->currentFrameId, tf->preemptiveMaskingFrames, mode_str);
 					if (rect.width > 0 && rect.height > 0) {
 						std::string text = "[" + mode_str + "]";
 						cv::Scalar color(0, 255, 255, 255); // Yellow
@@ -2387,7 +2445,7 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 			int num_mask_rects = 0;
 			
 			if (tf->stateHistory) {
-				std::set<int> active_ids = tf->stateHistory->get_all_active_ids(renderFrameId, tf->currentFrameId);
+				std::set<int> active_ids = tf->stateHistory->get_all_active_ids(maskRenderFrameId, tf->currentFrameId);
 				for (int id : active_ids) {
 					if (tf->enableFaceExclusion && tf->faceExemptIds.count(id)) {
 						continue; // 대상 얼굴로 확정된 경우 마스킹 렌더링에서 완전 제외
@@ -2395,7 +2453,7 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 					if (num_mask_rects >= 64) break;
 					
 					std::string mode_str;
-					cv::Rect2f rect = getFinalRenderBox(id, renderFrameId, tf->stateHistory.get(), tf->currentFrameId, tf->lookaheadDelayFrames, mode_str);
+					cv::Rect2f rect = getFinalRenderBox(id, maskRenderFrameId, tf->stateHistory.get(), tf->currentFrameId, tf->preemptiveMaskingFrames, mode_str);
 					
 					if (rect.width > 0 && rect.height > 0 && mode_str != "Ghost") {
 						float expansion = 0.0f;
@@ -2545,7 +2603,7 @@ struct obs_audio_data *detect_filter_audio(void *data, struct obs_audio_data *au
 		fps = (double)ovi.fps_num / (double)ovi.fps_den;
 	}
 
-	uint64_t target_delay_samples = (uint64_t)round(tf->videoDelayFrames * sample_rate / fps);
+	uint64_t target_delay_samples = (uint64_t)round((tf->videoDelayFrames + tf->lookaheadDelayFrames) * sample_rate / fps);
 	size_t target_delay_bytes = target_delay_samples * sizeof(float);
 
 	if (tf->resetAudio) {
@@ -2599,7 +2657,7 @@ struct obs_audio_data *detect_filter_audio(void *data, struct obs_audio_data *au
 
 		circlebuf_push_back(&tf->audioBuffers[c], audio->data[c], frame_bytes);
 
-		if (tf->audioBuffers[c].size >= frame_bytes) {
+		if (tf->audioBuffers[c].size >= (target_delay_bytes + frame_bytes)) {
 			circlebuf_pop_front(&tf->audioBuffers[c], audio->data[c], frame_bytes);
 		} else {
 			std::memset(audio->data[c], 0, frame_bytes);
