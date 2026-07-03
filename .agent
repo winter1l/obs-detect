@@ -3,22 +3,16 @@
 ## 프로젝트 현재 진행 상황
 - **마일스톤**: 렌더링 파이프라인 및 AI 추론부 최적화, 스레드 동기화 위험 제거, GPU 리소스 누수 해결 및 비동기 파일 I/O 스레드 결함 수정 완료 (최종 승인)
 - **최근 진행 작업**:
-  - 필터 옵션(속성 창)을 닫을 때 발생하는 프레임 드랍(화면 멈춤) 현상의 원인 분석 완료.
-  - 개선 작업 완료: 
-    - `detect_filter_update` 내 무거운 ONNX 모델 초기화 및 얼굴 참조 이미지 전처리/추론 과정을 `ioThread` 백그라운드 스레드로 비동기 이관.
-    - 중복 및 구버전 업데이트 오동작을 방지하기 위한 `settingsVersion` 버전 매칭 및 조기 탈출(동적 취소) 로직 적용.
+  - 사용자 제안에 따라 고스트 복구(Ghost Recovery) 알고리즘 개선 완료:
+    - 2단계 공간 매칭 시, 중심점 거리 외에 두 객체(트랙 vs 감지)의 면적 비율을 검증하는 로직 추가.
+    - 면적 비율 임계값(`ghost_recovery_size_ratio_limit`)을 넘어서는 경우(기본값 1.7배 초과) 오매칭으로 간주해 복구에서 배제.
+    - OBS UI 속성에 실수형 슬라이더(1.1 ~ 5.0, 디폴트 1.7)를 추가하여 사용자가 조절 가능하도록 연동.
+    - `ko-KR.ini`, `en-US.ini` 로컬라이제이션 언어팩 추가 완료.
+    - 수정된 코드의 CMake Release 빌드 수행 중.
+  - 기존 마일스톤 (최종 승인 내용):
+    - `detect_filter_update` 내 무거운 ONNX 모델 초기화 및 얼굴 참조 이미지 전처리 과정을 `ioThread`로 비동기 이관 완료.
     - 모델 및 얼굴 매칭 참조 리소스의 아토믹 스왑(Atomic Swap) 구현을 통한 무중단 렌더링 지원.
-    - `run_model_inference` 내 `onnxruntimemodel` 접근의 Data Race 방지를 위한 `modelMutex` 스레드 동기화 범위 강화.
-  - CMake Release 빌드 검증 성공 (`obs-detect.dll` 무결성 확인).
-- **현재 상태**: 
-  - 신규 브랜치 `optimization-review` 상에서 모든 최적화 및 버그 수정을 완료했습니다.
-  - `detect_filter_destroy` 내 GPU 리소스 누수 수정 및 `ioThread` 해제 과정이 정상 조치되었습니다.
-  - `referenceFaceFeatures`, `faceStatusCache` 및 `faceExemptIds`에 대한 Data Race 방지를 위해 `faceInferenceMutex`로 락 동기화를 완벽하게 처리하였고 중복 락 데드락 버그를 제거했습니다.
-  - `detect_filter_video_tick` 및 `inference_thread_loop`에서 `std::move`를 활용하여 `cv::Mat` 딥카피 횟수를 축소하였습니다.
-  - `detect_filter_video_render` 내 렌더링 스레드의 락 임계 영역 내에서는 얕은 복사만 수행하고, 딥카피(`clone()`)는 락 밖에서 실행하도록 리팩토링하여 OBS 60FPS 렌더 틱 방어와 레이턴시를 획기적으로 개선하였습니다.
-  - 비동기 파일 I/O 태스크 큐(`ioQueue`)와 단일 백그라운드 스레드(`ioThread`)를 도입해 과도한 std::thread 스폰 및 UAF 취약점을 해결하였으며, 종료 시 `while (true)` 루프와 락 내부 검사로 잔여 작업 유실 없는 정상 종료를 보장합니다.
-  - `verify_gpu_pipeline.py` E2E 테스트(20/20 PASS) 및 CMake Release 빌드 무결성이 모두 독립 검증 에이전트(reviewer_2)를 통해 APPROVE 되었습니다.
-  - **Victory Audit 결과**: Victory Auditor에 의해 3단계 검증이 성공적으로 완료되었으며, 최종 판정 'VICTORY CONFIRMED'를 획득하였습니다. (2026-06-30)
+    - `verify_gpu_pipeline.py` E2E 테스트 및 GPU 리소스 누수 수정 완료.
 
 ## 프로젝트 안내
 - 본 프로젝트는 OBS용 객체/얼굴 감지 필터 플러그인(C++)입니다.

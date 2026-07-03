@@ -344,11 +344,12 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_add_float_slider(sort_group_props, "instant_track_area_ratio", obs_module_text("InstantTrackAreaRatio"), 0.0, 100.0, 0.1);
 	obs_properties_add_int(sort_group_props, "max_unseen_frames", obs_module_text("MaxUnseenFrames"), 1, 30, 1);
 	obs_properties_add_float_slider(sort_group_props, "ghost_recovery_multiplier", obs_module_text("GhostRecoveryMultiplier"), 1.0, 5.0, 0.1);
+	obs_properties_add_float_slider(sort_group_props, "ghost_recovery_size_ratio_limit", obs_module_text("GhostRecoverySizeRatioLimit"), 1.1, 5.0, 0.1);
 
 	// Hide subproperties completely when unchecked
 	obs_property_set_modified_callback(sort_tracking, [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
 		const bool enabled = obs_data_get_bool(settings, "sort_tracking");
-		for (auto prop_name : {"min_hit_frames", "iou_threshold", "instant_track_area_ratio", "max_unseen_frames", "ghost_recovery_multiplier"}) {
+		for (auto prop_name : {"min_hit_frames", "iou_threshold", "instant_track_area_ratio", "max_unseen_frames", "ghost_recovery_multiplier", "ghost_recovery_size_ratio_limit"}) {
 			obs_property_t *prop = obs_properties_get(props_, prop_name);
 			if (prop) obs_property_set_visible(prop, enabled);
 		}
@@ -553,6 +554,7 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "crop_bottom", 0);
 	obs_data_set_default_int(settings, "min_size_threshold", 3000);
 	obs_data_set_default_double(settings, "ghost_recovery_multiplier", 1.8);
+	obs_data_set_default_double(settings, "ghost_recovery_size_ratio_limit", 1.7);
 	obs_data_set_default_int(settings, "ghost_recovery_max_unseen", 6);
 	obs_data_set_default_int(settings, "min_hit_frames", 7);
 	obs_data_set_default_double(settings, "iou_threshold", 0.20);
@@ -639,6 +641,10 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	float ghost_recovery_multiplier = (float)obs_data_get_double(settings, "ghost_recovery_multiplier");
 	if (tf->tracker.getGhostRecoveryMultiplier() != ghost_recovery_multiplier) {
 		tf->tracker.setGhostRecoveryMultiplier(ghost_recovery_multiplier);
+	}
+	float ghost_recovery_size_ratio_limit = (float)obs_data_get_double(settings, "ghost_recovery_size_ratio_limit");
+	if (tf->tracker.getGhostRecoverySizeRatioLimit() != ghost_recovery_size_ratio_limit) {
+		tf->tracker.setGhostRecoverySizeRatioLimit(ghost_recovery_size_ratio_limit);
 	}
 	tf->tracker.setGhostRecoveryMaxUnseen(6);
 

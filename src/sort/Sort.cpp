@@ -14,8 +14,7 @@
 
 #define INF std::numeric_limits<float>::infinity()
 
-// Constructor
-Sort::Sort(size_t maxUnseenFrames) : nextTrackID(0), maxUnseenFrames(maxUnseenFrames), minHitFrames(1), ghostRecoveryMultiplier(2.0f)
+Sort::Sort(size_t maxUnseenFrames) : nextTrackID(0), maxUnseenFrames(maxUnseenFrames), minHitFrames(1), ghostRecoveryMultiplier(2.0f), ghostRecoverySizeRatioLimit(1.7f)
 {
 }
 
@@ -352,6 +351,16 @@ std::vector<Object> Sort::update(uint64_t frameId, const std::vector<Object> &de
 			if (detectionUsed[j]) continue;
 			if (trackedObjects[i].label != detections[j].label) continue;
 			
+			// 크기(면적) 비율 검증
+			float t_area = trackedObjects[i].rect.area();
+			float d_area = detections[j].rect.area();
+			if (t_area <= 0.0f || d_area <= 0.0f) continue;
+			
+			float size_ratio = (t_area > d_area) ? (t_area / d_area) : (d_area / t_area);
+			if (size_ratio > this->ghostRecoverySizeRatioLimit) {
+				continue;
+			}
+
 			float d_cx = detections[j].rect.x + detections[j].rect.width / 2.0f;
 			float d_cy = detections[j].rect.y + detections[j].rect.height / 2.0f;
 			

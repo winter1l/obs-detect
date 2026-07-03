@@ -91,6 +91,15 @@ public:
 	// Get Ghost Recovery Max Unseen Frames
 	size_t getGhostRecoveryMaxUnseen() const { return this->ghostRecoveryMaxUnseen; }
 
+	// Set Ghost Recovery Size Ratio Limit
+	void setGhostRecoverySizeRatioLimit(float limit)
+	{
+		this->ghostRecoverySizeRatioLimit = limit;
+	}
+
+	// Get Ghost Recovery Size Ratio Limit
+	float getGhostRecoverySizeRatioLimit() const { return this->ghostRecoverySizeRatioLimit; }
+
 	// Set Kalman Min Noise
 	void setKalmanMinNoise(float minNoise)
 	{
@@ -123,6 +132,7 @@ private:
 	float screenHeight = 0.0f;
 	float ghostRecoveryMultiplier = 2.0f;
 	size_t ghostRecoveryMaxUnseen = 3;
+	float ghostRecoverySizeRatioLimit = 1.7f;
 	float kalmanMinNoise = 0.35f;
 	float kalmanAreaThreshold = 0.0f;
 	
