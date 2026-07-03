@@ -535,10 +535,10 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_double(settings, "threshold", 0.45);
 	obs_data_set_default_string(settings, "model_size", "small");
 	obs_data_set_default_int(settings, "object_category", 0);
-	obs_data_set_default_bool(settings, "enable_face_exclusion", false);
+	obs_data_set_default_bool(settings, "enable_face_exclusion", true);
 	obs_data_set_default_string(settings, "reference_face_path", "");
 	obs_data_set_default_int(settings, "person_category", -1);
-	obs_data_set_default_int(settings, "face_inference_interval", 30);
+	obs_data_set_default_int(settings, "face_inference_interval", 15);
 	obs_data_set_default_bool(settings, "masking_group", false);
 	obs_data_set_default_string(settings, "masking_type", "none");
 	obs_data_set_default_string(settings, "masking_color", "#000000");
@@ -562,8 +562,7 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "min_size_threshold", 3000);
 	obs_data_set_default_double(settings, "ghost_recovery_multiplier", 1.8);
 	obs_data_set_default_double(settings, "ghost_recovery_size_ratio_limit", 1.7);
-	obs_data_set_default_int(settings, "ghost_recovery_max_unseen", 6);
-	obs_data_set_default_int(settings, "min_hit_frames", 7);
+	obs_data_set_default_int(settings, "min_hit_frames", 5);
 	obs_data_set_default_double(settings, "iou_threshold", 0.20);
 	obs_data_set_default_double(settings, "instant_track_area_ratio", 4.0);
 }
