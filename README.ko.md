@@ -14,6 +14,19 @@
 
 이 프로젝트는 [EdgeYOLO-ROS](https://github.com/fateshelled/EdgeYOLO-ROS) 및 [PINTO-Model-Zoo](https://github.com/PINTO0309/PINTO_model_zoo), [yolov8-face](https://github.com/lindevs/yolov8-face)의 훌륭한 기여물을 사용합니다. 헝가리안 알고리즘(Hungarian algorithm)은 GPLv2 라이선스 하에 https://github.com/Gluttton/munkres-cpp 의 코드를 가져와 사용했습니다.
 
+## 사용법
+
+1. 이미지가 포함된 모든 소스(미디어, 브라우저, VLC, 이미지 등)에 "Detect" 필터를 추가합니다.
+2. "마스킹"을 활성화하고 블러나 모자이크로 선택합니다.
+3. 세부 설정을 조절합니다.
+
+> [!TIP]
+> 효과의 기본값이 **'Person'** 객체 카테고리(사람 추적)에 알맞게 최적화되어있습니다.
+
+### ['특정 대상 마스킹 제외 (얼굴 인식)' 사용법 보기](docs/FACE_GUIDE_KR.md)
+
+### [옵션 설명 보기]()
+
 ## [원본](https://github.com/royshil/obs-detect)과 무엇이 다른가?
 
 > 이 포크 리포지토리는 사람 10%와 AI 90%로 수정되었습니다.
@@ -47,18 +60,6 @@
 - **상태 시각화 오버레이**: 디버그 모드가 켜지면 각 추적 박스의 내부 상태 기계(`New`, `Stable`, `Recovered`, `Unseen`) 및 제외(Exempt) 상태를 오버레이로 화면에 표시합니다.
 - **한국어 추가**: 개발자가 영어를 못하는 한국인이어서 `ko-KR.ini` 언어 팩을 추가했습니다.
 - **비디오-객체 싱크 미세 조정**: 비디오 렌더 시점과 객체 추적 박스의 미세한 싱크 편차를 보정할 수 있도록 오프셋 조절 기능을 추가했습니다.
-
-## 사용법
-
-<div align="center">
-<a href="https://youtu.be/LrbUrvaGreQ"><img width="40%" src="https://github.com/occ-ai/obs-detect/assets/441170/b8e7367e-c1b0-4c7e-b0df-af45ead87199" /></a>&nbsp;
-<a href="https://youtu.be/zmdq1bPVYs0"><img width="40%" src="https://github.com/occ-ai/obs-detect/assets/441170/2eb08589-1695-4a40-877e-4985c2b5270f" /></a>
-</div>
-
-- 이미지가 포함된 모든 소스(미디어, 브라우저, VLC, 이미지 등)에 "Detect" 필터를 추가합니다.
-- "마스킹(Masking)" 또는 "추적(Tracking)"을 활성화합니다.
-
-Detect를 사용하여 반려동물을 추적하거나 비디오에서 사람들을 흐리게 처리(블러)해 보세요!
 
 ## 주요 기능
 
