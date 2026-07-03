@@ -23,11 +23,13 @@
 > [!TIP]
 > 효과의 기본값이 **'Person'** 객체 카테고리(사람 추적)에 알맞게 이미 최적화되어있습니다. **얼굴 추적으로 변경하고 싶을 경우** [여기](https://github.com/winter1l/obs-detect/blob/master/docs/Recommended-option-value_KR.md#face-%EA%B0%9D%EC%B2%B4)를 참고하세요.
 
-### ['특정 대상 마스킹 제외 (얼굴 인식)' 사용법 보기](docs/FACE_GUIDE_KR.md)
+- ### ['특정 대상 마스킹 제외 (얼굴 인식)' 사용법 보기](docs/FACE_GUIDE_KR.md)
 
-### [옵션 설명 보기]()
+- ### [추천 값 보기](docs/Recommended-option-value_KR.md)
 
-## [원본](https://github.com/royshil/obs-detect)과 무엇이 다른가?
+- ### [옵션 설명 보기]()
+
+## [원본(royshil/obs-detect)](https://github.com/royshil/obs-detect)과 무엇이 다른가?
 
 > 이 포크 리포지토리는 사람 10%와 AI 90%로 수정되었습니다.
 
@@ -56,10 +58,11 @@
 - **렌더 캐시 텍스처 갱신 개선**: 정적 소스 혹은 비디오 프레임 갱신 주기 변동 시 화면이 굳거나 마스크 렌더가 중단되는 동결(Frozen source) 버그를 `GS_DYNAMIC` 속성 바인딩 수정을 통해 해결했습니다.
 - **동적 크기 마스크 확장 (Dynamic Scale Expansion)**: 리소스 소모가 심한 기존 `cv::dilate` 연산을 제거하고, 객체 해상도와 카메라 거리 비율에 매칭되는 크기 스케일링 수학적 사각형 확장 연산을 자체 구현하여 리소스를 보존했습니다.
 
-### 5. UI/UX 정밀화 및 디버깅 오버레이 추가
+### 5. UI/UX 정밀화 및 기타 기능 추가
 - **상태 시각화 오버레이**: 디버그 모드가 켜지면 각 추적 박스의 내부 상태 기계(`New`, `Stable`, `Recovered`, `Unseen`) 및 제외(Exempt) 상태를 오버레이로 화면에 표시합니다.
 - **한국어 추가**: 개발자가 영어를 못하는 한국인이어서 `ko-KR.ini` 언어 팩을 추가했습니다.
 - **비디오-객체 싱크 미세 조정**: 비디오 렌더 시점과 객체 추적 박스의 미세한 싱크 편차를 보정할 수 있도록 오프셋 조절 기능을 추가했습니다.
+- **마스킹 경계선 페더 추가**: 마스크 경계선을 흐리게 하여 부드러워 보이도록 하는 '마스크 경계선 페더' 기능을 추가했습니다.
 
 ## 주요 기능
 
@@ -81,7 +84,8 @@
 
 ## 빌드 방법
 
-이 플러그인은 macOS (Intel 및 Apple Silicon), Windows, Linux 환경에서 빌드 및 테스트되었습니다.
+이 플러그인의 [원본(royshil/obs-detect)](https://github.com/royshil/obs-detect)은 macOS (Intel 및 Apple Silicon), Windows, Linux 환경에서 빌드 및 테스트되었습니다.
+<br>그러나, 본 포크는 Windows 환경에서만 빌드 및 테스트되었습니다.
 
 먼저 원하는 디렉토리에 이 리포지토리를 클론하세요.
 
