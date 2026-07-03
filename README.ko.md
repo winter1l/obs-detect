@@ -21,7 +21,7 @@
 3. 세부 설정을 조절합니다.
 
 > [!TIP]
-> 효과의 기본값이 **'Person'** 객체 카테고리(사람 추적)에 알맞게 이미 최적화되어있습니다. 얼굴로 변경하고 싶을 경우 [여기]()를 참고하세요.
+> 효과의 기본값이 **'Person'** 객체 카테고리(사람 추적)에 알맞게 이미 최적화되어있습니다. **얼굴 추적으로 변경하고 싶을 경우** [여기](https://github.com/winter1l/obs-detect/blob/master/docs/Recommended-option-value_KR.md#face-%EA%B0%9D%EC%B2%B4)를 참고하세요.
 
 ### ['특정 대상 마스킹 제외 (얼굴 인식)' 사용법 보기](docs/FACE_GUIDE_KR.md)
 
