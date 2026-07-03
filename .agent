@@ -1,24 +1,4 @@
-# obs-detect Agent Status
-
-## 프로젝트 현재 진행 상황
-- **마일스톤**: 렌더링 파이프라인 및 AI 추론부 최적화, 스레드 동기화 위험 제거, GPU 리소스 누수 해결 및 비동기 파일 I/O 스레드 결함 수정 완료 (최종 승인)
-  - 필터 프로퍼티 창을 열고 닫을 때 발생하는 비디오/오디오 배속 재생 및 지연 시간 변동(A/V 싱크 어긋남) 문제 근본적 수정 완료:
-    - `detect_filter_audio`의 오디오 지연 버퍼 연산에 비디오의 `lookaheadDelayFrames`(20프레임)를 합산하도록 반영.
-    - 필터 미리보기 화면과 라이브 송출 화면이 동시 렌더링될 때 `video_render` 중복 호출로 `currentFrameId`가 빠르게 올라가 지연 시간이 단축되는 현상 해결하기 위해, `video_tick`에서 상태 플래그를 관리하여 1틱당 1회만 프레임 ID 증가 및 텍스처 지연 큐 복사를 수행하는 프레임 캐싱 기법 적용.
-    - 필터 아웃풋 플래그에 `OBS_SOURCE_AUDIO`를 추가하여 녹화 및 방송 활성화 시에도 오디오 필터 지연이 누락 없이 정상 구동되도록 개선.
-  - 사용자 제안에 따라 고스트 복구(Ghost Recovery) 알고리즘 개선 완료:
-    - 2단계 공간 매칭 시, 중심점 거리 외에 두 객체(트랙 vs 감지)의 면적 비율을 검증하는 로직 추가.
-    - 면적 비율 임계값(`ghost_recovery_size_ratio_limit`)을 넘어서는 경우(기본값 1.7배 초과) 오매칭으로 간주해 복구에서 배제.
-    - OBS UI 속성에 실수형 슬라이더(1.1 ~ 5.0, 디폴트 1.7)를 추가하여 사용자가 조절 가능하도록 연동.
-    - `ko-KR.ini`, `en-US.ini` 로컬라이제이션 언어팩 추가 완료.
-    - 수정된 코드의 CMake Release 빌드 수행 및 정상 작동 검증 완료.
-  - 기존 마일스톤 (최종 승인 내용):
-    - `detect_filter_update` 내 무거운 ONNX 모델 초기화 및 얼굴 참조 이미지 전처리 과정을 `ioThread`로 비동기 이관 완료.
-    - 모델 및 얼굴 매칭 참조 리소스의 아토믹 스왑(Atomic Swap) 구현을 통한 무중단 렌더링 지원.
-    - `verify_gpu_pipeline.py` E2E 테스트 및 GPU 리소스 누수 수정 완료.
-
-## 프로젝트 안내
-- 본 프로젝트는 OBS용 객체/얼굴 감지 필터 플러그인(C++)입니다.
-- 인퍼런스는 백그라운드 스레드에서 비동기 처리되며, CPU 및 GPU(DirectML) 최적화로 동작합니다.
-- 빌드는 CMake 시스템 기반이며, `cmake --build build --config Release`로 릴리즈 빌드를 수행합니다.
-- 파이썬 스크립트 실행 경로는 `C:\Users\chc01\AppData\Local\Programs\Python\Python311\python.exe`를 사용합니다.
+# Project Status
+- **Current Task**: 병합 작업 (look-ahead -> master)
+- **Status**: 진행 중
+- **Details**: `look-ahead` 브랜치의 최신 작업 내역(로컬라이제이션 설정 및 필터 코어 로직 등)을 `master` 브랜치에 병합하고 원격 저장소에 푸시하는 작업을 수행 중입니다.
