@@ -1,5 +1,9 @@
 #include "detect-filter.h"
 
+#include <obs-frontend-api.h>
+#include <QMainWindow>
+#include <QMetaObject>
+
 #include <onnxruntime_cxx_api.h>
 
 #include "sface/SFace.h"
@@ -477,12 +481,15 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_property_set_enabled(detected_obj_prop, false);
 
 	obs_properties_add_bool(debug_group_props, "debug_mode", obs_module_text("DebugMode"));
-	obs_properties_add_bool(debug_group_props, "enable_face_stats", obs_module_text("ShowFaceSimilarityStats"));
 	obs_properties_add_bool(debug_group_props, "show_yunet_detections", obs_module_text("ShowYuNetDetections"));
+	obs_properties_add_bool(debug_group_props, "enable_face_stats", obs_module_text("ShowFaceSimilarityStats"));
 	obs_properties_add_bool(debug_group_props, "enable_similarity_log", obs_module_text("EnableSimilarityLog"));
 	
-	obs_properties_add_button(debug_group_props, "open_obs_logs", "OBS 로그 폴더 열기", [](obs_properties_t *, obs_property_t *, void *) {
-		system("explorer %appdata%\\obs-studio\\logs");
+	obs_properties_add_button(debug_group_props, "open_obs_logs", "OBS 로그 보기", [](obs_properties_t *, obs_property_t *, void *) {
+		QMainWindow *main_window = static_cast<QMainWindow *>(obs_frontend_get_main_window());
+		if (main_window) {
+			QMetaObject::invokeMethod(main_window, "on_actionViewCurrentLog_triggered", Qt::QueuedConnection);
+		}
 		return false;
 	});
 
