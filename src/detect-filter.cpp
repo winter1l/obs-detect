@@ -565,7 +565,7 @@ void detect_filter_update(void *data, obs_data_t *settings)
 
 	struct detect_filter *tf = reinterpret_cast<detect_filter *>(data);
 
-	tf->isDisabled = true;
+	int targetVersion = ++tf->settingsVersion;
 
 	tf->preview = obs_data_get_bool(settings, "preview");
 
@@ -578,7 +578,8 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	tf->debugMode = obs_data_get_bool(settings, "debug_mode");
 	tf->conf_threshold = (float)obs_data_get_double(settings, "threshold");
 	tf->objectCategory = (int)obs_data_get_int(settings, "object_category");
-	tf->enableFaceExclusion = obs_data_get_bool(settings, "enable_face_exclusion");
+	bool newEnableFaceExclusion = obs_data_get_bool(settings, "enable_face_exclusion");
+	tf->enableFaceExclusion = newEnableFaceExclusion;
 	const char *ref_path = obs_data_get_string(settings, "reference_face_path");
 	std::string newRefPath = (ref_path && strlen(ref_path) > 0) ? ref_path : "";
 	bool refPathChanged = (tf->referenceFacePath != newRefPath);
@@ -651,22 +652,16 @@ void detect_filter_update(void *data, obs_data_t *settings)
 		}
 		if (tf->trackingEnabled) {
 			obs_log(LOG_DEBUG, "Tracking enabled");
-			// get the parent of the source
-			// check if it has a crop/pad filter
 			obs_source_t *crop_pad_filter =
 				obs_source_get_filter_by_name(parent, "Detect Tracking");
 			if (!crop_pad_filter) {
-				// create a crop-pad filter
 				crop_pad_filter = obs_source_create(
 					"crop_filter", "Detect Tracking", nullptr, nullptr);
-				// add a crop/pad filter to the source
-				// set the parent of the crop/pad filter to the parent of the source
 				obs_source_filter_add(parent, crop_pad_filter);
 			}
 			tf->trackingFilter = crop_pad_filter;
 		} else {
 			obs_log(LOG_DEBUG, "Tracking disabled");
-			// remove the crop/pad filter
 			obs_source_t *crop_pad_filter =
 				obs_source_get_filter_by_name(parent, "Detect Tracking");
 			if (crop_pad_filter) {
@@ -679,198 +674,217 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	const std::string newUseGpu = obs_data_get_string(settings, "useGPU");
 	const uint32_t newNumThreads = (uint32_t)obs_data_get_int(settings, "numThreads");
 	const std::string newModelSize = obs_data_get_string(settings, "model_size");
+	const std::string externalModelFile = obs_data_get_string(settings, "external_model_file") ? obs_data_get_string(settings, "external_model_file") : "";
 
 	bool reinitialize = false;
 	if (tf->useGPU != newUseGpu || tf->numThreads != newNumThreads ||
 	    tf->modelSize != newModelSize) {
-		obs_log(LOG_INFO, "Reinitializing model");
 		reinitialize = true;
+	}
 
-		// lock modelMutex
-		std::unique_lock<std::mutex> lock(tf->modelMutex);
-
-		char *modelFilepath_rawPtr = nullptr;
-		if (newModelSize == "small") {
-			modelFilepath_rawPtr =
-				obs_module_file("models/edgeyolo_tiny_lrelu_coco_256x416.onnx");
-		} else if (newModelSize == "medium") {
-			modelFilepath_rawPtr =
-				obs_module_file("models/edgeyolo_tiny_lrelu_coco_480x800.onnx");
-		} else if (newModelSize == "large") {
-			modelFilepath_rawPtr =
-				obs_module_file("models/edgeyolo_tiny_lrelu_coco_736x1280.onnx");
-		} else if (newModelSize == FACE_YUNET_MODEL_SIZE) {
-			modelFilepath_rawPtr = obs_module_file("models/face_detection_yunet_2023mar.onnx");
-		} else if (newModelSize == FACE_YOLO_N_MODEL_SIZE) {
-			modelFilepath_rawPtr = obs_module_file("models/yolov8n-face.onnx");
-		} else if (newModelSize == FACE_YOLO_S_MODEL_SIZE) {
-			modelFilepath_rawPtr = obs_module_file("models/yolov8s-face.onnx");
-		} else if (newModelSize == EXTERNAL_MODEL_SIZE) {
-			const char *external_model_file =
-				obs_data_get_string(settings, "external_model_file");
-			if (external_model_file == nullptr || external_model_file[0] == '\0' ||
-			    strlen(external_model_file) == 0) {
-				obs_log(LOG_ERROR, "External model file path is empty");
-				tf->isDisabled = true;
-				return;
-			}
-			modelFilepath_rawPtr = bstrdup(external_model_file);
-		} else {
-			obs_log(LOG_ERROR, "Invalid model size: %s", newModelSize.c_str());
-			tf->isDisabled = true;
-			return;
-		}
-
-		if (modelFilepath_rawPtr == nullptr) {
-			obs_log(LOG_ERROR, "Unable to get model filename from plugin.");
-			tf->isDisabled = true;
-			return;
-		}
-
-#if _WIN32
-		int outLength = MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, modelFilepath_rawPtr,
-						    -1, nullptr, 0);
-		tf->modelFilepath = std::wstring(outLength, L'\0');
-		MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, modelFilepath_rawPtr, -1,
-				    tf->modelFilepath.data(), outLength);
-#else
-		tf->modelFilepath = std::string(modelFilepath_rawPtr);
-#endif
-		bfree(modelFilepath_rawPtr);
-
-		// Re-initialize model if it's not already the selected one or switching inference device
-		tf->useGPU = newUseGpu;
-		tf->numThreads = newNumThreads;
-		tf->modelSize = newModelSize;
-
-		// parameters
-		int onnxruntime_device_id_ = 0;
-		bool onnxruntime_use_parallel_ = true;
-		float nms_th_ = 0.45f;
-		int num_classes_ = (int)edgeyolo_cpp::COCO_CLASSES.size();
-		tf->classNames = edgeyolo_cpp::COCO_CLASSES;
-
-		// If this is an external model - look for the config JSON file
-		if (tf->modelSize == EXTERNAL_MODEL_SIZE) {
-#ifdef _WIN32
-			std::wstring labelsFilepath = tf->modelFilepath;
-			labelsFilepath.replace(labelsFilepath.find(L".onnx"), 5, L".json");
-#else
-			std::string labelsFilepath = tf->modelFilepath;
-			labelsFilepath.replace(labelsFilepath.find(".onnx"), 5, ".json");
-#endif
-			std::ifstream labelsFile(labelsFilepath);
-			if (labelsFile.is_open()) {
-				// Parse the JSON file
-				nlohmann::json j;
-				labelsFile >> j;
-				if (j.contains("names")) {
-					std::vector<std::string> labels = j["names"];
-					num_classes_ = (int)labels.size();
-					tf->classNames = labels;
-				} else {
-					obs_log(LOG_ERROR,
-						"JSON file does not contain 'labels' field");
-					tf->isDisabled = true;
-					tf->onnxruntimemodel.reset();
-					return;
-				}
-			} else {
-				obs_log(LOG_ERROR, "Failed to open JSON file: %s",
-					labelsFilepath.c_str());
-				tf->isDisabled = true;
-				tf->onnxruntimemodel.reset();
-				return;
-			}
-		} else if (tf->modelSize == FACE_YUNET_MODEL_SIZE ||
-			   tf->modelSize == FACE_YOLO_N_MODEL_SIZE ||
-			   tf->modelSize == FACE_YOLO_S_MODEL_SIZE) {
-			num_classes_ = 1;
-			tf->classNames = yunet::FACE_CLASSES;
-		}
-
-		// Load model
-		try {
-			if (tf->onnxruntimemodel) {
-				tf->onnxruntimemodel.reset();
-			}
-			if (tf->modelSize == FACE_YUNET_MODEL_SIZE) {
-				tf->onnxruntimemodel = std::make_unique<yunet::YuNetONNX>(
-					tf->modelFilepath, tf->numThreads, 50, tf->numThreads,
-					tf->useGPU, onnxruntime_device_id_,
-					onnxruntime_use_parallel_, nms_th_, tf->conf_threshold);
-			} else if (tf->modelSize == FACE_YOLO_N_MODEL_SIZE ||
-				   tf->modelSize == FACE_YOLO_S_MODEL_SIZE) {
-				tf->onnxruntimemodel = std::make_unique<YOLOv8FaceONNX>(
-					tf->modelFilepath, tf->numThreads, tf->numThreads,
-					tf->useGPU, onnxruntime_device_id_,
-					onnxruntime_use_parallel_, nms_th_, tf->conf_threshold);
-			} else {
-				tf->onnxruntimemodel =
-					std::make_unique<edgeyolo_cpp::EdgeYOLOONNXRuntime>(
-						tf->modelFilepath, tf->numThreads, num_classes_,
-						tf->numThreads, tf->useGPU, onnxruntime_device_id_,
-						onnxruntime_use_parallel_, nms_th_,
-						tf->conf_threshold);
-			}
-			// clear error message
-			obs_data_set_string(settings, "error", "");
-		} catch (const std::exception &e) {
-			obs_log(LOG_ERROR, "Failed to load model: %s", e.what());
-			// disable filter
-			tf->isDisabled = true;
-			tf->onnxruntimemodel.reset();
-			return;
+	bool needsFaceLoader = false;
+	if (newEnableFaceExclusion) {
+		if (reinitialize || refPathChanged || (!tf->referenceFacesAttempted && tf->referenceFaceFeatures.empty())) {
+			needsFaceLoader = true;
 		}
 	}
 
-	// Load face recognition models if enabled
-	if (tf->enableFaceExclusion) {
-		try {
-			char *yunet_raw = obs_module_file("models/face_detection_yunet_2023mar.onnx");
-			char *sface_raw = obs_module_file("models/face_recognition_sface_2021dec.onnx");
-			
-			if (yunet_raw && sface_raw) {
-#ifdef _WIN32
-				int y_len = MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, yunet_raw, -1, nullptr, 0);
-				std::wstring y_wstr(y_len, L'\0');
-				MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, yunet_raw, -1, y_wstr.data(), y_len);
-				
-				int s_len = MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, sface_raw, -1, nullptr, 0);
-				std::wstring s_wstr(s_len, L'\0');
-				MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, sface_raw, -1, s_wstr.data(), s_len);
-				
-				std::lock_guard<std::mutex> lock(tf->faceInferenceMutex);
-				if (!tf->yunetModel || !tf->sfaceModel) {
-					tf->yunetModel = std::make_shared<yunet::YuNetONNX>(y_wstr, 1, 50, 1, "cpu", 0, false, 0.45f, 0.5f);
-					tf->sfaceModel = std::make_shared<sface::SFaceONNX>(s_wstr, 1, 1, "cpu", 0, false);
+	if (reinitialize || needsFaceLoader || (!newEnableFaceExclusion && !tf->referenceFaceFeatures.empty())) {
+		tf->isModelLoading = true;
+
+		std::string modelFilepath_source = "";
+		char *modelFilepath_rawPtr = nullptr;
+		bool invalidModel = false;
+		if (reinitialize) {
+			if (newModelSize == "small") {
+				modelFilepath_rawPtr =
+					obs_module_file("models/edgeyolo_tiny_lrelu_coco_256x416.onnx");
+			} else if (newModelSize == "medium") {
+				modelFilepath_rawPtr =
+					obs_module_file("models/edgeyolo_tiny_lrelu_coco_480x800.onnx");
+			} else if (newModelSize == "large") {
+				modelFilepath_rawPtr =
+					obs_module_file("models/edgeyolo_tiny_lrelu_coco_736x1280.onnx");
+			} else if (newModelSize == FACE_YUNET_MODEL_SIZE) {
+				modelFilepath_rawPtr = obs_module_file("models/face_detection_yunet_2023mar.onnx");
+			} else if (newModelSize == FACE_YOLO_N_MODEL_SIZE) {
+				modelFilepath_rawPtr = obs_module_file("models/yolov8n-face.onnx");
+			} else if (newModelSize == FACE_YOLO_S_MODEL_SIZE) {
+				modelFilepath_rawPtr = obs_module_file("models/yolov8s-face.onnx");
+			} else if (newModelSize == EXTERNAL_MODEL_SIZE) {
+				if (!externalModelFile.empty()) {
+					modelFilepath_rawPtr = bstrdup(externalModelFile.c_str());
+				} else {
+					obs_log(LOG_ERROR, "External model file path is empty");
+					invalidModel = true;
+				}
+			} else {
+				obs_log(LOG_ERROR, "Invalid model size: %s", newModelSize.c_str());
+				invalidModel = true;
+			}
+
+			if (modelFilepath_rawPtr) {
+				modelFilepath_source = modelFilepath_rawPtr;
+				bfree(modelFilepath_rawPtr);
+			} else {
+				if (!invalidModel) {
+					obs_log(LOG_ERROR, "Unable to get model filename from plugin.");
+				}
+				invalidModel = true;
+			}
+		}
+
+		if (invalidModel) {
+			tf->isDisabled = true;
+			tf->isModelLoading = false;
+			return;
+		}
+
+		auto loadTask = [tf, targetVersion, reinitialize, needsFaceLoader, newUseGpu, newNumThreads, newModelSize, modelFilepath_source, newEnableFaceExclusion, newRefPath, refPathChanged]() {
+			if (tf->settingsVersion != targetVersion) {
+				return;
+			}
+
+			std::unique_ptr<ONNXRuntimeModel> tempModel;
+			std::vector<std::string> tempClassNames;
+#if _WIN32
+			std::wstring tempModelFilepath;
+#else
+			std::string tempModelFilepath;
+#endif
+
+			if (reinitialize) {
+#if _WIN32
+				int outLength = MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, modelFilepath_source.c_str(),
+									-1, nullptr, 0);
+				tempModelFilepath = std::wstring(outLength, L'\0');
+				MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, modelFilepath_source.c_str(), -1,
+									tempModelFilepath.data(), outLength);
+				if (outLength > 0 && !tempModelFilepath.empty() && tempModelFilepath.back() == L'\0') {
+					tempModelFilepath.pop_back();
 				}
 #else
-				std::lock_guard<std::mutex> lock(tf->faceInferenceMutex);
-				if (!tf->yunetModel || !tf->sfaceModel) {
-					tf->yunetModel = std::make_shared<yunet::YuNetONNX>(std::string(yunet_raw), 1, 50, 1, "cpu", 0, false, 0.45f, 0.5f);
-					tf->sfaceModel = std::make_shared<sface::SFaceONNX>(std::string(sface_raw), 1, 1, "cpu", 0, false);
-				}
+				tempModelFilepath = modelFilepath_source;
 #endif
-			}
-			if (yunet_raw) bfree(yunet_raw);
-			if (sface_raw) bfree(sface_raw);
 
-			// Pre-calculate reference face features
-			{
-				std::lock_guard<std::mutex> lock(tf->faceInferenceMutex);
-				if (!tf->referenceFacePath.empty() && tf->yunetModel && tf->sfaceModel) {
-					if (reinitialize || refPathChanged || (!tf->referenceFacesAttempted && tf->referenceFaceFeatures.empty())) {
-						tf->referenceFacesAttempted = true;
-						tf->referenceFaceFeatures.clear();
+				int onnxruntime_device_id_ = 0;
+				bool onnxruntime_use_parallel_ = true;
+				float nms_th_ = 0.45f;
+				int num_classes_ = (int)edgeyolo_cpp::COCO_CLASSES.size();
+				tempClassNames = edgeyolo_cpp::COCO_CLASSES;
+
+				if (newModelSize == EXTERNAL_MODEL_SIZE) {
 #ifdef _WIN32
-						int p_len = MultiByteToWideChar(CP_UTF8, 0, tf->referenceFacePath.c_str(), -1, nullptr, 0);
+					std::wstring labelsFilepath = tempModelFilepath;
+					labelsFilepath.replace(labelsFilepath.find(L".onnx"), 5, L".json");
+#else
+					std::string labelsFilepath = tempModelFilepath;
+					labelsFilepath.replace(labelsFilepath.find(".onnx"), 5, ".json");
+#endif
+					std::ifstream labelsFile(labelsFilepath);
+					if (labelsFile.is_open()) {
+						nlohmann::json j;
+						labelsFile >> j;
+						if (j.contains("names")) {
+							std::vector<std::string> labels = j["names"];
+							num_classes_ = (int)labels.size();
+							tempClassNames = labels;
+						} else {
+							obs_log(LOG_ERROR, "JSON file does not contain 'names' field");
+							return;
+						}
+					} else {
+						obs_log(LOG_ERROR, "Failed to open JSON file: %ls", labelsFilepath.c_str());
+						return;
+					}
+				} else if (newModelSize == FACE_YUNET_MODEL_SIZE ||
+						   newModelSize == FACE_YOLO_N_MODEL_SIZE ||
+						   newModelSize == FACE_YOLO_S_MODEL_SIZE) {
+					num_classes_ = 1;
+					tempClassNames = yunet::FACE_CLASSES;
+				}
+
+				if (tf->settingsVersion != targetVersion) return;
+
+				try {
+					if (newModelSize == FACE_YUNET_MODEL_SIZE) {
+						tempModel = std::make_unique<yunet::YuNetONNX>(
+							tempModelFilepath, newNumThreads, 50, newNumThreads,
+							newUseGpu, onnxruntime_device_id_,
+							onnxruntime_use_parallel_, nms_th_, tf->conf_threshold);
+					} else if (newModelSize == FACE_YOLO_N_MODEL_SIZE ||
+							   newModelSize == FACE_YOLO_S_MODEL_SIZE) {
+						tempModel = std::make_unique<YOLOv8FaceONNX>(
+							tempModelFilepath, newNumThreads, newNumThreads,
+							newUseGpu, onnxruntime_device_id_,
+							onnxruntime_use_parallel_, nms_th_, tf->conf_threshold);
+					} else {
+						tempModel = std::make_unique<edgeyolo_cpp::EdgeYOLOONNXRuntime>(
+							tempModelFilepath, newNumThreads, num_classes_,
+							newNumThreads, newUseGpu, onnxruntime_device_id_,
+							onnxruntime_use_parallel_, nms_th_,
+							tf->conf_threshold);
+					}
+				} catch (const std::exception &e) {
+					obs_log(LOG_ERROR, "Failed to load model: %s", e.what());
+					return;
+				}
+			}
+
+			if (tf->settingsVersion != targetVersion) return;
+
+			std::shared_ptr<yunet::YuNetONNX> tempYunet;
+			std::shared_ptr<sface::SFaceONNX> tempSface;
+			std::vector<std::vector<float>> tempFeatures;
+
+			if (newEnableFaceExclusion) {
+				try {
+					{
+						std::lock_guard<std::mutex> lock(tf->faceInferenceMutex);
+						tempYunet = tf->yunetModel;
+						tempSface = tf->sfaceModel;
+						tempFeatures = tf->referenceFaceFeatures;
+					}
+
+					if (!tempYunet || !tempSface) {
+						char *yunet_raw = obs_module_file("models/face_detection_yunet_2023mar.onnx");
+						char *sface_raw = obs_module_file("models/face_recognition_sface_2021dec.onnx");
+						
+						if (yunet_raw && sface_raw) {
+#ifdef _WIN32
+							int y_len = MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, yunet_raw, -1, nullptr, 0);
+							std::wstring y_wstr(y_len, L'\0');
+							MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, yunet_raw, -1, y_wstr.data(), y_len);
+							if (y_len > 0 && y_wstr.back() == L'\0') y_wstr.pop_back();
+							
+							int s_len = MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, sface_raw, -1, nullptr, 0);
+							std::wstring s_wstr(s_len, L'\0');
+							MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, sface_raw, -1, s_wstr.data(), s_len);
+							if (s_len > 0 && s_wstr.back() == L'\0') s_wstr.pop_back();
+
+							tempYunet = std::make_shared<yunet::YuNetONNX>(y_wstr, 1, 50, 1, "cpu", 0, false, 0.45f, 0.5f);
+							tempSface = std::make_shared<sface::SFaceONNX>(s_wstr, 1, 1, "cpu", 0, false);
+#else
+							tempYunet = std::make_shared<yunet::YuNetONNX>(std::string(yunet_raw), 1, 50, 1, "cpu", 0, false, 0.45f, 0.5f);
+							tempSface = std::make_shared<sface::SFaceONNX>(std::string(sface_raw), 1, 1, "cpu", 0, false);
+#endif
+						}
+						if (yunet_raw) bfree(yunet_raw);
+						if (sface_raw) bfree(sface_raw);
+					}
+
+					if (tf->settingsVersion != targetVersion) return;
+
+					if (needsFaceLoader && !newRefPath.empty() && tempYunet && tempSface) {
+						tempFeatures.clear();
+#ifdef _WIN32
+						int p_len = MultiByteToWideChar(CP_UTF8, 0, newRefPath.c_str(), -1, nullptr, 0);
 						std::wstring p_wstr(p_len, L'\0');
-						MultiByteToWideChar(CP_UTF8, 0, tf->referenceFacePath.c_str(), -1, p_wstr.data(), p_len);
+						MultiByteToWideChar(CP_UTF8, 0, newRefPath.c_str(), -1, p_wstr.data(), p_len);
 						if (p_len > 0 && p_wstr.back() == L'\0') p_wstr.pop_back();
 						std::filesystem::path refPath(p_wstr);
 #else
-						std::filesystem::path refPath(tf->referenceFacePath);
+						std::filesystem::path refPath(newRefPath);
 #endif
 						std::vector<std::filesystem::path> filesToProcess;
 						try {
@@ -886,9 +900,11 @@ void detect_filter_update(void *data, obs_data_t *settings)
 						} catch (const std::exception& e) {
 							obs_log(LOG_ERROR, "Failed to read reference face path: %s", e.what());
 						}
-						
+
 						int successCount = 0;
 						for (const auto& filePath : filesToProcess) {
+							if (tf->settingsVersion != targetVersion) return;
+
 #ifdef _WIN32
 							FILE* f = _wfopen(filePath.wstring().c_str(), L"rb");
 #else
@@ -907,88 +923,107 @@ void detect_filter_update(void *data, obs_data_t *settings)
 							}
 							
 							if (!refImg.empty()) {
-								std::vector<Object> faces = tf->yunetModel->inference(refImg);
+								std::vector<Object> faces = tempYunet->inference(refImg);
 								if (!faces.empty()) {
-									std::vector<float> feat = tf->sfaceModel->inference(refImg, faces[0].landmarks);
-									tf->referenceFaceFeatures.push_back(feat);
+									std::vector<float> feat = tempSface->inference(refImg, faces[0].landmarks);
+									tempFeatures.push_back(feat);
 									successCount++;
 								}
 							}
 						}
-						
+
 						if (successCount > 0) {
 							obs_log(LOG_INFO, "Reference faces loaded successfully: %d images", successCount);
 						} else {
-							obs_log(LOG_WARNING, "No valid faces detected in the reference face path: %s", tf->referenceFacePath.c_str());
+							obs_log(LOG_WARNING, "No valid faces detected in the reference face path: %s", newRefPath.c_str());
 						}
+					} else if (newRefPath.empty()) {
+						tempFeatures.clear();
 					}
-				} else {
-					tf->referenceFaceFeatures.clear();
+				} catch (const std::exception &e) {
+					obs_log(LOG_ERROR, "Failed to load face recognition models: %s", e.what());
 				}
 			}
-		} catch (const std::exception &e) {
-			obs_log(LOG_ERROR, "Failed to load face recognition models: %s", e.what());
+
+			if (tf->settingsVersion != targetVersion) return;
+
+			{
+				std::lock_guard<std::mutex> lock(tf->modelMutex);
+				if (reinitialize) {
+					tf->onnxruntimemodel = std::move(tempModel);
+					tf->classNames = std::move(tempClassNames);
+					tf->modelFilepath = std::move(tempModelFilepath);
+					tf->useGPU = newUseGpu;
+					tf->numThreads = newNumThreads;
+					tf->modelSize = newModelSize;
+				}
+				if (tf->onnxruntimemodel) {
+					tf->onnxruntimemodel->setBBoxConfThresh(tf->conf_threshold);
+				}
+			}
+
+			{
+				std::lock_guard<std::mutex> lock(tf->faceInferenceMutex);
+				if (newEnableFaceExclusion) {
+					tf->yunetModel = tempYunet;
+					tf->sfaceModel = tempSface;
+					tf->referenceFaceFeatures = std::move(tempFeatures);
+					tf->referenceFacesAttempted = true;
+				} else {
+					tf->yunetModel.reset();
+					tf->sfaceModel.reset();
+					tf->referenceFaceFeatures.clear();
+					tf->referenceFacesAttempted = false;
+					tf->faceStatusCache.clear();
+					tf->faceSimilarityCache.clear();
+					tf->faceExemptIds.clear();
+					{
+						std::lock_guard<std::mutex> d_lock(tf->debugFaceMutex);
+						tf->debugFaceBoxes.clear();
+					}
+				}
+			}
+
+			if (reinitialize) {
+				obs_log(LOG_INFO, "Detect Filter Options updated asynchronously:");
+				obs_log(LOG_INFO, "  Source: %s", obs_source_get_name(tf->source));
+				obs_log(LOG_INFO, "  Inference Device: %s", tf->useGPU.c_str());
+				obs_log(LOG_INFO, "  Num Threads: %d", tf->numThreads);
+				obs_log(LOG_INFO, "  Model Size: %s", tf->modelSize.c_str());
+			}
+
+			tf->isDisabled = false;
+			tf->isModelLoading = false;
+		};
+
+		{
+			std::lock_guard<std::mutex> lock(tf->ioMutex);
+			tf->ioQueue.push_back(loadTask);
+			tf->ioCV.notify_all();
+		}
+	} else {
+		if (tf->onnxruntimemodel) {
+			std::lock_guard<std::mutex> lock(tf->modelMutex);
+			tf->onnxruntimemodel->setBBoxConfThresh(tf->conf_threshold);
+		}
+
+		if (!newEnableFaceExclusion) {
 			std::lock_guard<std::mutex> lock(tf->faceInferenceMutex);
 			tf->yunetModel.reset();
 			tf->sfaceModel.reset();
 			tf->referenceFaceFeatures.clear();
+			tf->referenceFacesAttempted = false;
+			tf->faceStatusCache.clear();
+			tf->faceSimilarityCache.clear();
+			tf->faceExemptIds.clear();
+			{
+				std::lock_guard<std::mutex> d_lock(tf->debugFaceMutex);
+				tf->debugFaceBoxes.clear();
+			}
 		}
-	} else {
-		std::lock_guard<std::mutex> lock(tf->faceInferenceMutex);
-		tf->yunetModel.reset();
-		tf->sfaceModel.reset();
-		tf->referenceFaceFeatures.clear();
-		tf->referenceFacesAttempted = false;
-		tf->faceStatusCache.clear();
-		tf->faceSimilarityCache.clear();
-		tf->faceExemptIds.clear();
-		{
-			std::lock_guard<std::mutex> d_lock(tf->debugFaceMutex);
-			tf->debugFaceBoxes.clear();
-		}
-	}
 
-	// update threshold on edgeyolo
-	if (tf->onnxruntimemodel) {
-		tf->onnxruntimemodel->setBBoxConfThresh(tf->conf_threshold);
+		tf->isDisabled = false;
 	}
-
-	if (reinitialize) {
-		// Log the currently selected options
-		obs_log(LOG_INFO, "Detect Filter Options:");
-		// name of the source that the filter is attached to
-		obs_log(LOG_INFO, "  Source: %s", obs_source_get_name(tf->source));
-		obs_log(LOG_INFO, "  Inference Device: %s", tf->useGPU.c_str());
-		obs_log(LOG_INFO, "  Num Threads: %d", tf->numThreads);
-		obs_log(LOG_INFO, "  Model Size: %s", tf->modelSize.c_str());
-		obs_log(LOG_INFO, "  Preview: %s", tf->preview ? "true" : "false");
-		obs_log(LOG_INFO, "  Threshold: %.2f", tf->conf_threshold);
-		obs_log(LOG_INFO, "  Object Category: %s",
-			obs_data_get_string(settings, "object_category"));
-		obs_log(LOG_INFO, "  Masking Enabled: %s",
-			obs_data_get_bool(settings, "masking_group") ? "true" : "false");
-		obs_log(LOG_INFO, "  Masking Type: %s",
-			obs_data_get_string(settings, "masking_type"));
-		obs_log(LOG_INFO, "  Masking Color: %s",
-			obs_data_get_string(settings, "masking_color"));
-		obs_log(LOG_INFO, "  Masking Blur Radius: %d",
-			obs_data_get_int(settings, "masking_blur_radius"));
-		obs_log(LOG_INFO, "  Tracking Enabled: %s",
-			obs_data_get_bool(settings, "tracking_group") ? "true" : "false");
-		obs_log(LOG_INFO, "  Zoom Factor: %.2f",
-			obs_data_get_double(settings, "zoom_factor"));
-		obs_log(LOG_INFO, "  Zoom Object: %s",
-			obs_data_get_string(settings, "zoom_object"));
-		obs_log(LOG_INFO, "  Disabled: %s", tf->isDisabled ? "true" : "false");
-#ifdef _WIN32
-		obs_log(LOG_INFO, "  Model file path: %ls", tf->modelFilepath.c_str());
-#else
-		obs_log(LOG_INFO, "  Model file path: %s", tf->modelFilepath.c_str());
-#endif
-	}
-
-	// enable
-	tf->isDisabled = false;
 }
 
 void detect_filter_activate(void *data)
@@ -1011,6 +1046,7 @@ void detect_filter_deactivate(void *data)
 static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 {
 	static auto last_loop_time = std::chrono::high_resolution_clock::now();
+	std::unique_lock<std::mutex> lock(tf->modelMutex);
 	if (!tf->onnxruntimemodel) {
 		tf->isInferencing = false;
 		return;
@@ -1025,7 +1061,6 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 #ifdef _WIN32
 	if (tf->useGpuZeroCopyCurrentFrame && tf->onnxruntimemodel->is_gpu_pipeline_ready()) {
 		try {
-			std::unique_lock<std::mutex> lock(tf->modelMutex);
 			objects = tf->onnxruntimemodel->inference_gpu();
 			gpu_run_success = true;
 		} catch (const std::exception &e) {
@@ -1051,7 +1086,6 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 		}
 
 		try {
-			std::unique_lock<std::mutex> lock(tf->modelMutex);
 			objects = tf->onnxruntimemodel->inference(inferenceFrame);
 		} catch (const Ort::Exception &e) {
 			obs_log(LOG_ERROR, "ONNXRuntime Exception: %s", e.what());
@@ -1071,6 +1105,8 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 			}
 		}
 	}
+
+	lock.unlock();
 
 	// update the detected object text input
 	if (objects.size() > 0) {

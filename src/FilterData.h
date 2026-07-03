@@ -174,6 +174,8 @@ struct filter_data {
 	std::mutex ioMutex;
 	std::condition_variable ioCV;
 	std::vector<std::function<void()>> ioQueue;
+	std::atomic<int> settingsVersion{0};
+	std::atomic<bool> isModelLoading{false};
 
 	std::unique_ptr<ONNXRuntimeModel> onnxruntimemodel;
 	std::vector<std::string> classNames;
