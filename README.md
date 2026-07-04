@@ -1,4 +1,4 @@
-### ```EN``` / [KR](#obs-detect---object-detection-and-masking-filter-fork)
+### ```EN``` / [KR](#obs-detect---%EA%B0%9D%EC%B2%B4-%EA%B0%90%EC%A7%80-%EB%B0%8F-%EB%A7%88%EC%8A%A4%ED%82%B9-%ED%95%84%ED%84%B0-fork)
 
 # OBS Detect - Object Detection and Masking Filter (fork)
 
