@@ -146,7 +146,97 @@ obs_properties_t *detect_filter_properties(void *data)
 
 	obs_properties_t *props = obs_properties_create();
 
-	obs_properties_add_int_slider(props, "video_delay_frames", obs_module_text("VideoDelayFrames"), 0, 10, 1);
+	// add drop down option for model size: Small, Medium, Large
+	obs_property_t *model_size =
+		obs_properties_add_list(props, "model_size", obs_module_text("ModelSize"),
+					OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+	obs_property_list_add_string(model_size, obs_module_text("SmallFast"), "small");
+	obs_property_list_add_string(model_size, obs_module_text("Medium"), "medium");
+	obs_property_list_add_string(model_size, obs_module_text("LargeSlow"), "large");
+	obs_property_list_add_string(model_size, obs_module_text("FaceTrackingModel.YuNet"),
+				     FACE_YUNET_MODEL_SIZE);
+	obs_property_list_add_string(model_size, obs_module_text("FaceTrackingModel.YOLOv8n"),
+				     FACE_YOLO_N_MODEL_SIZE);
+	obs_property_list_add_string(model_size, obs_module_text("FaceTrackingModel.YOLOv8s"),
+				     FACE_YOLO_S_MODEL_SIZE);
+	obs_property_list_add_string(model_size, obs_module_text("ExternalModel"),
+				     EXTERNAL_MODEL_SIZE);
+
+	// add external model file path
+	obs_properties_add_path(props, "external_model_file", obs_module_text("ModelPath"),
+				OBS_PATH_FILE, "EdgeYOLO onnx files (*.onnx);;all files (*.*)",
+				nullptr);
+
+	// add callback to show/hide the external model file path
+	obs_property_set_modified_callback2(
+		model_size,
+		[](void *data_, obs_properties_t *props_, obs_property_t *p, obs_data_t *settings) {
+			UNUSED_PARAMETER(p);
+			struct detect_filter *tf_ = reinterpret_cast<detect_filter *>(data_);
+			std::string model_size_value = obs_data_get_string(settings, "model_size");
+			bool is_external = model_size_value == EXTERNAL_MODEL_SIZE;
+			bool is_face_detect = (model_size_value == FACE_YUNET_MODEL_SIZE ||
+					       model_size_value == FACE_YOLO_N_MODEL_SIZE ||
+					       model_size_value == FACE_YOLO_S_MODEL_SIZE);
+			
+			obs_property_t *prop = obs_properties_get(props_, "external_model_file");
+			obs_property_set_visible(prop, is_external);
+
+			if (!is_external) {
+				if (is_face_detect) {
+					// set the class names to COCO classes for face detection model
+					set_class_names_on_object_category(
+						obs_properties_get(props_, "object_category"),
+						yunet::FACE_CLASSES);
+					set_class_names_on_object_category(
+						obs_properties_get(props_, "face_category"),
+						yunet::FACE_CLASSES);
+					set_class_names_on_object_category(
+						obs_properties_get(props_, "person_category"),
+						yunet::FACE_CLASSES);
+					tf_->classNames = yunet::FACE_CLASSES;
+				} else {
+					// reset the class names to COCO classes for default models
+					set_class_names_on_object_category(
+						obs_properties_get(props_, "object_category"),
+						edgeyolo_cpp::COCO_CLASSES);
+					set_class_names_on_object_category(
+						obs_properties_get(props_, "face_category"),
+						edgeyolo_cpp::COCO_CLASSES);
+					set_class_names_on_object_category(
+						obs_properties_get(props_, "person_category"),
+						edgeyolo_cpp::COCO_CLASSES);
+					tf_->classNames = edgeyolo_cpp::COCO_CLASSES;
+				}
+			} else {
+				// if the model path is already set - update the class names
+				const char *model_file =
+					obs_data_get_string(settings, "external_model_file");
+				read_model_config_json_and_set_class_names(model_file, props_,
+									   settings, tf_);
+			}
+			return true;
+		},
+		tf);
+
+	// add callback on the model file path to check if the file exists
+	obs_property_set_modified_callback2(
+		obs_properties_get(props, "external_model_file"),
+		[](void *data_, obs_properties_t *props_, obs_property_t *p, obs_data_t *settings) {
+			UNUSED_PARAMETER(p);
+			const char *model_size_value = obs_data_get_string(settings, "model_size");
+			bool is_external = strcmp(model_size_value, EXTERNAL_MODEL_SIZE) == 0;
+			if (!is_external) {
+				return true;
+			}
+			struct detect_filter *tf_ = reinterpret_cast<detect_filter *>(data_);
+			const char *model_file =
+				obs_data_get_string(settings, "external_model_file");
+			read_model_config_json_and_set_class_names(model_file, props_, settings,
+								   tf_);
+			return true;
+		},
+		tf);
 
 	// add dropdown selection for object category selection: "All", or COCO classes
 	obs_property_t *object_category =
@@ -209,7 +299,7 @@ obs_properties_t *detect_filter_properties(void *data)
 							       obs_module_text("MaskingType"),
 							       OBS_COMBO_TYPE_LIST,
 							       OBS_COMBO_FORMAT_STRING);
-	obs_property_list_add_string(masking_type, obs_module_text("None"), "none");
+	obs_property_list_add_string(masking_type, obs_module_text("None"), "none"); // 이거 지워
 	obs_property_list_add_string(masking_type, obs_module_text("SolidColor"), "solid_color");
 	obs_property_list_add_string(masking_type, obs_module_text("OutputMask"), "output_mask");
 	obs_property_list_add_string(masking_type, obs_module_text("Blur"), "blur");
@@ -308,9 +398,30 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_add_int_slider(crop_group_props, "crop_bottom",
 				      obs_module_text("CropBottom"), 0, 1000, 1);
 
+	// SORT Tracking Group
+	obs_properties_t *sort_group_props = obs_properties_create();
+	obs_property_t *sort_tracking =
+		obs_properties_add_group(props, "sort_tracking", obs_module_text("SORTTracking"),
+					 OBS_GROUP_CHECKABLE, sort_group_props);
+
+	obs_properties_add_int(sort_group_props, "min_hit_frames", obs_module_text("MinHitFrames"), 1, 10, 1);
+	obs_properties_add_float_slider(sort_group_props, "instant_track_area_ratio", obs_module_text("InstantTrackAreaRatio"), 0.0, 100.0, 0.1);
+	obs_properties_add_int(sort_group_props, "max_unseen_frames", obs_module_text("MaxUnseenFrames"), 1, 30, 1);
+	obs_properties_add_float_slider(sort_group_props, "iou_threshold", obs_module_text("IouThreshold"), 0.01, 1.0, 0.01);
+	obs_properties_add_float_slider(sort_group_props, "ghost_recovery_multiplier", obs_module_text("GhostRecoveryMultiplier"), 1.0, 5.0, 0.1);
+	obs_properties_add_float_slider(sort_group_props, "ghost_recovery_size_ratio_limit", obs_module_text("GhostRecoverySizeRatioLimit"), 1.1, 3.0, 0.1);
+
+	// Hide subproperties completely when unchecked
+	obs_property_set_modified_callback(sort_tracking, [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
+		const bool enabled = obs_data_get_bool(settings, "sort_tracking");
+		for (auto prop_name : {"min_hit_frames", "iou_threshold", "instant_track_area_ratio", "max_unseen_frames", "ghost_recovery_multiplier", "ghost_recovery_size_ratio_limit"}) {
+			obs_property_t *prop = obs_properties_get(props_, prop_name);
+			if (prop) obs_property_set_visible(prop, enabled);
+		}
+		return true;
+	});
+
 	// Face Exclusion Group
-	obs_property_t *face_ex_sep = obs_properties_add_text(props, "face_ex_separator", "--------------------------------------------------", OBS_TEXT_DEFAULT);
-	obs_property_set_enabled(face_ex_sep, false);
 	obs_properties_t *face_ex_group_props = obs_properties_create();
 	obs_property_t *enable_face_exclusion =
 		obs_properties_add_group(props, "enable_face_exclusion", obs_module_text("EnableFaceExclusion"),
@@ -335,30 +446,7 @@ obs_properties_t *detect_filter_properties(void *data)
 			if (prop) obs_property_set_visible(prop, enabled);
 		}
 		return true;
-	});
-
-	// SORT Tracking Group
-	obs_properties_t *sort_group_props = obs_properties_create();
-	obs_property_t *sort_tracking =
-		obs_properties_add_group(props, "sort_tracking", obs_module_text("SORTTracking"),
-					 OBS_GROUP_CHECKABLE, sort_group_props);
-
-	obs_properties_add_int(sort_group_props, "min_hit_frames", obs_module_text("MinHitFrames"), 1, 10, 1);
-	obs_properties_add_float_slider(sort_group_props, "iou_threshold", obs_module_text("IouThreshold"), 0.01, 1.0, 0.01);
-	obs_properties_add_float_slider(sort_group_props, "instant_track_area_ratio", obs_module_text("InstantTrackAreaRatio"), 0.0, 100.0, 0.1);
-	obs_properties_add_int(sort_group_props, "max_unseen_frames", obs_module_text("MaxUnseenFrames"), 1, 30, 1);
-	obs_properties_add_float_slider(sort_group_props, "ghost_recovery_multiplier", obs_module_text("GhostRecoveryMultiplier"), 1.0, 5.0, 0.1);
-	obs_properties_add_float_slider(sort_group_props, "ghost_recovery_size_ratio_limit", obs_module_text("GhostRecoverySizeRatioLimit"), 1.1, 3.0, 0.1);
-
-	// Hide subproperties completely when unchecked
-	obs_property_set_modified_callback(sort_tracking, [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
-		const bool enabled = obs_data_get_bool(settings, "sort_tracking");
-		for (auto prop_name : {"min_hit_frames", "iou_threshold", "instant_track_area_ratio", "max_unseen_frames", "ghost_recovery_multiplier", "ghost_recovery_size_ratio_limit"}) {
-			obs_property_t *prop = obs_properties_get(props_, prop_name);
-			if (prop) obs_property_set_visible(prop, enabled);
-		}
-		return true;
-	});
+	});	
 
 	/* GPU, CPU and performance Props */
 	obs_property_t *p_use_gpu =
@@ -378,108 +466,14 @@ obs_properties_t *detect_filter_properties(void *data)
 
 	obs_properties_add_int_slider(props, "numThreads", obs_module_text("NumThreads"), 0, 32, 1);
 
-	// add drop down option for model size: Small, Medium, Large
-	obs_property_t *model_size =
-		obs_properties_add_list(props, "model_size", obs_module_text("ModelSize"),
-					OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
-	obs_property_list_add_string(model_size, obs_module_text("SmallFast"), "small");
-	obs_property_list_add_string(model_size, obs_module_text("Medium"), "medium");
-	obs_property_list_add_string(model_size, obs_module_text("LargeSlow"), "large");
-	obs_property_list_add_string(model_size, obs_module_text("FaceTrackingModel.YuNet"),
-				     FACE_YUNET_MODEL_SIZE);
-	obs_property_list_add_string(model_size, obs_module_text("FaceTrackingModel.YOLOv8n"),
-				     FACE_YOLO_N_MODEL_SIZE);
-	obs_property_list_add_string(model_size, obs_module_text("FaceTrackingModel.YOLOv8s"),
-				     FACE_YOLO_S_MODEL_SIZE);
-	obs_property_list_add_string(model_size, obs_module_text("ExternalModel"),
-				     EXTERNAL_MODEL_SIZE);
-
-	// add external model file path
-	obs_properties_add_path(props, "external_model_file", obs_module_text("ModelPath"),
-				OBS_PATH_FILE, "EdgeYOLO onnx files (*.onnx);;all files (*.*)",
-				nullptr);
-
-	// add callback to show/hide the external model file path
-	obs_property_set_modified_callback2(
-		model_size,
-		[](void *data_, obs_properties_t *props_, obs_property_t *p, obs_data_t *settings) {
-			UNUSED_PARAMETER(p);
-			struct detect_filter *tf_ = reinterpret_cast<detect_filter *>(data_);
-			std::string model_size_value = obs_data_get_string(settings, "model_size");
-			bool is_external = model_size_value == EXTERNAL_MODEL_SIZE;
-			bool is_face_detect = (model_size_value == FACE_YUNET_MODEL_SIZE ||
-					       model_size_value == FACE_YOLO_N_MODEL_SIZE ||
-					       model_size_value == FACE_YOLO_S_MODEL_SIZE);
-			
-			obs_property_t *prop = obs_properties_get(props_, "external_model_file");
-			obs_property_set_visible(prop, is_external);
-
-			if (!is_external) {
-				if (is_face_detect) {
-					// set the class names to COCO classes for face detection model
-					set_class_names_on_object_category(
-						obs_properties_get(props_, "object_category"),
-						yunet::FACE_CLASSES);
-					set_class_names_on_object_category(
-						obs_properties_get(props_, "face_category"),
-						yunet::FACE_CLASSES);
-					set_class_names_on_object_category(
-						obs_properties_get(props_, "person_category"),
-						yunet::FACE_CLASSES);
-					tf_->classNames = yunet::FACE_CLASSES;
-				} else {
-					// reset the class names to COCO classes for default models
-					set_class_names_on_object_category(
-						obs_properties_get(props_, "object_category"),
-						edgeyolo_cpp::COCO_CLASSES);
-					set_class_names_on_object_category(
-						obs_properties_get(props_, "face_category"),
-						edgeyolo_cpp::COCO_CLASSES);
-					set_class_names_on_object_category(
-						obs_properties_get(props_, "person_category"),
-						edgeyolo_cpp::COCO_CLASSES);
-					tf_->classNames = edgeyolo_cpp::COCO_CLASSES;
-				}
-			} else {
-				// if the model path is already set - update the class names
-				const char *model_file =
-					obs_data_get_string(settings, "external_model_file");
-				read_model_config_json_and_set_class_names(model_file, props_,
-									   settings, tf_);
-			}
-			return true;
-		},
-		tf);
-
-	// add callback on the model file path to check if the file exists
-	obs_property_set_modified_callback2(
-		obs_properties_get(props, "external_model_file"),
-		[](void *data_, obs_properties_t *props_, obs_property_t *p, obs_data_t *settings) {
-			UNUSED_PARAMETER(p);
-			const char *model_size_value = obs_data_get_string(settings, "model_size");
-			bool is_external = strcmp(model_size_value, EXTERNAL_MODEL_SIZE) == 0;
-			if (!is_external) {
-				return true;
-			}
-			struct detect_filter *tf_ = reinterpret_cast<detect_filter *>(data_);
-			const char *model_file =
-				obs_data_get_string(settings, "external_model_file");
-			read_model_config_json_and_set_class_names(model_file, props_, settings,
-								   tf_);
-			return true;
-		},
-		tf);
-
 	// Debug & Statistics Group (At the very bottom)
 	obs_properties_t *debug_group_props = obs_properties_create();
 	obs_properties_add_group(props, "debug_group", obs_module_text("DebugGroup"), OBS_GROUP_NORMAL, debug_group_props);
 
-	obs_properties_add_bool(debug_group_props, "preview", obs_module_text("Preview"));
-	
-	obs_property_t *detected_obj_prop = obs_properties_add_text(
-		debug_group_props, "detected_object", obs_module_text("DetectedObject"), OBS_TEXT_DEFAULT);
-	obs_property_set_enabled(detected_obj_prop, false);
+	// 여기에 총 지연시간 표시 코드 작성 예정
 
+	obs_properties_add_int_slider(debug_group_props, "video_delay_frames", obs_module_text("VideoDelayFrames"), 0, 10, 1);
+	obs_properties_add_bool(debug_group_props, "preview", obs_module_text("Preview"));
 	obs_properties_add_bool(debug_group_props, "debug_mode", obs_module_text("DebugMode"));
 	obs_properties_add_bool(debug_group_props, "show_yunet_detections", obs_module_text("ShowYuNetDetections"));
 	obs_properties_add_bool(debug_group_props, "enable_face_stats", obs_module_text("ShowFaceSimilarityStats"));
@@ -494,6 +488,10 @@ obs_properties_t *detect_filter_properties(void *data)
 	});
 
 	obs_properties_add_path(debug_group_props, "save_detections_path", obs_module_text("SaveDetectionsPath"), OBS_PATH_FILE, "*.json", NULL);
+
+	obs_property_t *detected_obj_prop = obs_properties_add_text(
+		debug_group_props, "detected_object", obs_module_text("DetectedObject"), OBS_TEXT_DEFAULT);
+	obs_property_set_enabled(detected_obj_prop, false);
 
 	// Add a informative text about the plugin
 	std::string basic_info =
@@ -535,17 +533,17 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_double(settings, "threshold", 0.45);
 	obs_data_set_default_string(settings, "model_size", "small");
 	obs_data_set_default_int(settings, "object_category", 0);
-	obs_data_set_default_bool(settings, "enable_face_exclusion", true);
+	obs_data_set_default_bool(settings, "enable_face_exclusion", false);
 	obs_data_set_default_string(settings, "reference_face_path", "");
 	obs_data_set_default_int(settings, "person_category", -1);
 	obs_data_set_default_int(settings, "face_inference_interval", 15);
 	obs_data_set_default_bool(settings, "masking_group", false);
-	obs_data_set_default_string(settings, "masking_type", "none");
+	obs_data_set_default_string(settings, "masking_type", "blur");
 	obs_data_set_default_string(settings, "masking_color", "#000000");
 	obs_data_set_default_int(settings, "masking_blur_radius", 10);
 	obs_data_set_default_int(settings, "masking_feather", 30);
 	obs_data_set_default_int(settings, "masking_dilate_iterations", 0);
-	obs_data_set_default_bool(settings, "masking_dynamic_expansion", false);
+	obs_data_set_default_bool(settings, "masking_dynamic_expansion", true);
 	obs_data_set_default_double(settings, "masking_dynamic_expansion_base", 1.0);
 	obs_data_set_default_double(settings, "masking_dynamic_expansion_ratio", 0.05);
 	obs_data_set_default_int(settings, "dilation_iterations", 0);

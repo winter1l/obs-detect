@@ -18,6 +18,7 @@ This guide explains recommended values for blurring Person and Face objects duri
 - **Minimum Area Threshold**
   - Objects smaller than this area will be ignored.
   - Recommended: Person `3000`, Face `50`
+
 ### Masking
 - **Masking Type**
   - Recommended: `Blur` or `Pixelate`
@@ -35,28 +36,7 @@ This guide explains recommended values for blurring Person and Face objects duri
       - The larger the object, the more the mask expands proportionally.
         - Example: When a face is far away it is small and fully covered, but up close the hair and ears may be exposed — so the mask scales up accordingly.
       - Recommended: Person `0.05`, Face `0.25`
-### Exclude Specific Targets from Masking (Face Recognition)
-> For a detailed guide, see [here](FACE_GUIDE_EN.md).
-- **Person Category**
-  - If tracking multiple object types, specify which category represents a person.
-  - Not required if your objects are already set to Person or Face.
-- **Face Image Folder**
-  - Select the folder containing reference face photos.
-- **Face Match Similarity Threshold**
-  - Faces with a similarity score above this value will be excluded from masking.
-  - Recommended: `0.60`
-- **Minimum Object Size for Recognition**
-  - The minimum object size required to perform face recognition.
-    - **This refers to the size of the object in the non-face object category!**
-  - This option helps prevent false matches with distant passersby who are too far away.
-  - Recommended: Person `19.00`, Face `0.60`
-- **Face Recognition Check Interval (Frames)**
-  - Face recognition is performed every N frames.
-  - A shorter interval is fine if performance allows, but be aware that another person's similarity score could spike above the threshold momentarily.
-  - Recommended: `5`-`15` (at 30fps)
-- **Max Exempt Objects Limit**
-  - Set the total number of people you want to exclude from masking.
-  - `0` means unlimited.
+
 ### Continuous Tracking
 - **Minimum Tracking Frames**
   - Sets how many consecutive frames an object must be detected before masking begins.
@@ -79,3 +59,26 @@ This guide explains recommended values for blurring Person and Face objects duri
 - **Missed Object Recovery Size Ratio Limit**
   - Within the recovery search area, an object is only considered the same if its size differs from the lost object by less than this ratio.
   - Recommended: `1.70`
+
+### Exclude Specific Targets from Masking (Face Recognition)
+> For a detailed guide, see [here](FACE_GUIDE_EN.md).
+- **Person Category**
+  - If tracking multiple object types, specify which category represents a person.
+  - Not required if your objects are already set to Person or Face.
+- **Face Image Folder**
+  - Select the folder containing reference face photos.
+- **Face Match Similarity Threshold**
+  - Faces with a similarity score above this value will be excluded from masking.
+  - Recommended: `0.60`
+- **Minimum Object Size for Recognition**
+  - The minimum object size required to perform face recognition.
+    - **This refers to the size of the object in the non-face object category!**
+  - This option helps prevent false matches with distant passersby who are too far away.
+  - Recommended: Person `19.00`, Face `0.60`
+- **Face Recognition Check Interval (Frames)**
+  - Face recognition is performed every N frames.
+  - A shorter interval is fine if performance allows, but be aware that another person's similarity score could spike above the threshold momentarily.
+  - Recommended: `5`-`15` (at 30fps)
+- **Max Exempt Objects Limit**
+  - Set the total number of people you want to exclude from masking.
+  - `0` means unlimited.
