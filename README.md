@@ -1,4 +1,4 @@
-```EN``` / [KR](# OBS Detect - 객체 감지 및 마스킹 필터 (fork))
+### ```EN``` / [KR](#obs-detect---object-detection-and-masking-filter-fork)
 
 # OBS Detect - Object Detection and Masking Filter (fork)
 
@@ -137,7 +137,7 @@ The build should exist in the `./release` folder off the root. You can manually 
 
 
 
-[EN](# OBS Detect - Object Detection and Masking Filter (fork)) / ```KR```
+### [EN](#obs-detect---object-detection-and-masking-filter-fork) / ```KR```
 
 # OBS Detect - 객체 감지 및 마스킹 필터 (fork)
 
