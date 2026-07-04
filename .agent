@@ -1,4 +1,9 @@
 # Project Status
-- **Current Task**: 한국어 번역 지원 (README.ko.md 생성)
+- **Current Task**: 필터 비활성화/버퍼 처리, SORT 트래킹 고정, 지연시간 UI 개선 및 마스크 상태 표시 위치 수정
 - **Status**: 완료
-- **Details**: 기존 `README.md` 파일을 한국어로 번역하여 `README.ko.md` 파일로 작성 완료하였습니다.
+- **Details**:
+  1. 필터 비활성화 시 비디오, 트래킹, 오디오 버퍼가 즉시 초기화되도록 `clear_all_buffers` 헬퍼를 추가하고 `video_tick`, `video_render`, `deactivate`에 적용했습니다.
+  2. 연속 트래킹(`SORTTracking`)을 항상 활성화하고 UI 체크박스를 제거했습니다.
+  3. 마스킹 유형에서 `none`을 제거했습니다.
+  4. 총 지연시간 UI를 `OBS_TEXT_INFO`를 통해 `플러그인 총 지연시간: 500 ms` 형태로 깔끔하게 표시되도록 고쳤습니다.
+  5. 마스킹 상태 표시(`[Confirmed]` 등)가 `debug_mode`가 아닌 `preview` 조건 하에 그려지도록 위치를 이동했습니다.

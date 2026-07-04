@@ -19,6 +19,9 @@ public:
 	// Update the tracking with detected objects
 	std::vector<Object> update(uint64_t frameId, const std::vector<Object> &detections);
 
+	// Reset all tracked objects (e.g. when filter is deactivated)
+	void reset() { trackedObjects.clear(); }
+
 	// Get the current tracked objects and their classes
 	std::vector<Object> getTrackedObjects() const;
 

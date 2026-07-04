@@ -285,21 +285,18 @@ obs_properties_t *detect_filter_properties(void *data)
 		} else if (masking_type_value == "blur" || masking_type_value == "pixelate") {
 			if (masking_blur_radius) obs_property_set_visible(masking_blur_radius, masking_enabled);
 		}
-		if (masking_type_value != "none") {
-			if (masking_feather) obs_property_set_visible(masking_feather, masking_enabled);
-		}
+		if (masking_feather) obs_property_set_visible(masking_feather, masking_enabled);
 		return true;
 	};
 
 	// add callback to show/hide masking options
 	obs_property_set_modified_callback(masking_group_prop, update_masking_visibility);
 
-	// add masking options drop down selection: "None", "Solid color", "Blur", "Transparent"
+	// add masking options drop down selection: "Solid color", "Blur", "Transparent"
 	obs_property_t *masking_type = obs_properties_add_list(masking_group, "masking_type",
 							       obs_module_text("MaskingType"),
 							       OBS_COMBO_TYPE_LIST,
 							       OBS_COMBO_FORMAT_STRING);
-	obs_property_list_add_string(masking_type, obs_module_text("None"), "none"); // 이거 지워
 	obs_property_list_add_string(masking_type, obs_module_text("SolidColor"), "solid_color");
 	obs_property_list_add_string(masking_type, obs_module_text("OutputMask"), "output_mask");
 	obs_property_list_add_string(masking_type, obs_module_text("Blur"), "blur");
@@ -398,11 +395,10 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_add_int_slider(crop_group_props, "crop_bottom",
 				      obs_module_text("CropBottom"), 0, 1000, 1);
 
-	// SORT Tracking Group
+	// SORT Tracking Group (항상 활성화 - 체크박스 없음)
 	obs_properties_t *sort_group_props = obs_properties_create();
-	obs_property_t *sort_tracking =
-		obs_properties_add_group(props, "sort_tracking", obs_module_text("SORTTracking"),
-					 OBS_GROUP_CHECKABLE, sort_group_props);
+	obs_properties_add_group(props, "sort_tracking", obs_module_text("SORTTracking"),
+				 OBS_GROUP_NORMAL, sort_group_props);
 
 	obs_properties_add_int(sort_group_props, "min_hit_frames", obs_module_text("MinHitFrames"), 1, 10, 1);
 	obs_properties_add_float_slider(sort_group_props, "instant_track_area_ratio", obs_module_text("InstantTrackAreaRatio"), 0.0, 100.0, 0.1);
@@ -410,16 +406,6 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_add_float_slider(sort_group_props, "iou_threshold", obs_module_text("IouThreshold"), 0.01, 1.0, 0.01);
 	obs_properties_add_float_slider(sort_group_props, "ghost_recovery_multiplier", obs_module_text("GhostRecoveryMultiplier"), 1.0, 5.0, 0.1);
 	obs_properties_add_float_slider(sort_group_props, "ghost_recovery_size_ratio_limit", obs_module_text("GhostRecoverySizeRatioLimit"), 1.1, 3.0, 0.1);
-
-	// Hide subproperties completely when unchecked
-	obs_property_set_modified_callback(sort_tracking, [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
-		const bool enabled = obs_data_get_bool(settings, "sort_tracking");
-		for (auto prop_name : {"min_hit_frames", "iou_threshold", "instant_track_area_ratio", "max_unseen_frames", "ghost_recovery_multiplier", "ghost_recovery_size_ratio_limit"}) {
-			obs_property_t *prop = obs_properties_get(props_, prop_name);
-			if (prop) obs_property_set_visible(prop, enabled);
-		}
-		return true;
-	});
 
 	// Face Exclusion Group
 	obs_properties_t *face_ex_group_props = obs_properties_create();
@@ -470,11 +456,24 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_t *debug_group_props = obs_properties_create();
 	obs_properties_add_group(props, "debug_group", obs_module_text("DebugGroup"), OBS_GROUP_NORMAL, debug_group_props);
 
-	// 여기에 총 지연시간 표시 코드 작성 예정
+	// 현재 총 지연시간 표시 (플러그인 비활성화 시 0ms<< 더 고쳐야 함)
+	{
+		double fps = 60.0;
+		struct obs_video_info ovi;
+		if (obs_get_video_info(&ovi) && ovi.fps_den > 0) {
+			fps = (double)ovi.fps_num / (double)ovi.fps_den;
+		}
+		int total_delay_frames = (tf->isDisabled || !obs_source_enabled(tf->source)) ? 0 : (tf->videoDelayFrames + tf->lookaheadDelayFrames);
+		double total_delay_ms = (fps > 0.0) ? (total_delay_frames / fps * 1000.0) : 0.0;
+		char delay_info[128];
+		snprintf(delay_info, sizeof(delay_info), "%s: %.0f ms", obs_module_text("TotalDelayDisplay"), total_delay_ms);
+		obs_properties_add_text(debug_group_props, "total_delay_display",
+					 delay_info, OBS_TEXT_INFO);
+	}
 
 	obs_properties_add_int_slider(debug_group_props, "video_delay_frames", obs_module_text("VideoDelayFrames"), 0, 10, 1);
-	obs_properties_add_bool(debug_group_props, "preview", obs_module_text("Preview"));
 	obs_properties_add_bool(debug_group_props, "debug_mode", obs_module_text("DebugMode"));
+	obs_properties_add_bool(debug_group_props, "preview", obs_module_text("Preview"));
 	obs_properties_add_bool(debug_group_props, "show_yunet_detections", obs_module_text("ShowYuNetDetections"));
 	obs_properties_add_bool(debug_group_props, "enable_face_stats", obs_module_text("ShowFaceSimilarityStats"));
 	obs_properties_add_bool(debug_group_props, "enable_similarity_log", obs_module_text("EnableSimilarityLog"));
@@ -607,7 +606,7 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	tf->zoomFactor = (float)obs_data_get_double(settings, "zoom_factor");
 	tf->zoomSpeedFactor = (float)obs_data_get_double(settings, "zoom_speed_factor");
 	tf->zoomObject = obs_data_get_string(settings, "zoom_object");
-	tf->sortTracking = obs_data_get_bool(settings, "sort_tracking");
+	tf->sortTracking = true; // 연속 트래킹 항상 활성화 (체크박스 제거됨)
 	size_t maxUnseenFrames = (size_t)obs_data_get_int(settings, "max_unseen_frames");
 	if (tf->tracker.getMaxUnseenFrames() != maxUnseenFrames) {
 		tf->tracker.setMaxUnseenFrames(maxUnseenFrames);
@@ -1043,12 +1042,46 @@ void detect_filter_activate(void *data)
 	tf->isDisabled = false;
 }
 
+static void clear_all_buffers(struct detect_filter *tf, bool in_graphics_ctx)
+{
+	bool cleared_any = false;
+	if (!tf->delayedTextures.empty() || !tf->texturePool.empty() || !tf->delayedFrameIds.empty()) {
+		if (!in_graphics_ctx) obs_enter_graphics();
+		for (auto tex : tf->delayedTextures) gs_texture_destroy(tex);
+		tf->delayedTextures.clear();
+		for (auto tex : tf->texturePool) gs_texture_destroy(tex);
+		tf->texturePool.clear();
+		tf->delayedFrameIds.clear();
+		if (!in_graphics_ctx) obs_leave_graphics();
+		cleared_any = true;
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(tf->outputLock);
+		if (!tf->latestObjects.empty()) {
+			tf->latestObjects.clear();
+			cleared_any = true;
+		}
+	}
+
+	if (cleared_any) {
+		tf->tracker.reset();
+		if (tf->stateHistory) tf->stateHistory->clear();
+		std::lock_guard<std::mutex> lock(tf->audioMutex);
+		for (int i = 0; i < MAX_AUDIO_CHANNELS; i++) {
+			circlebuf_free(&tf->audioBuffers[i]);
+			circlebuf_init(&tf->audioBuffers[i]);
+		}
+		tf->resetAudio = true;
+	}
+}
+
 void detect_filter_deactivate(void *data)
 {
 	obs_log(LOG_INFO, "Detect filter deactivated");
 	struct detect_filter *tf = reinterpret_cast<detect_filter *>(data);
 	tf->isDisabled = true;
-	if (tf->stateHistory) tf->stateHistory->clear();
+	clear_all_buffers(tf, false);
 }
 
 /**                   FILTER CORE                     */
@@ -1880,6 +1913,7 @@ void detect_filter_video_tick(void *data, float seconds)
 	tf->tickRendered = false;
 
 	if (tf->isDisabled || !tf->onnxruntimemodel || !obs_source_enabled(tf->source)) {
+		clear_all_buffers(tf, false);
 		return;
 	}
 
@@ -2213,6 +2247,7 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 	}
 
 	if (tf->isDisabled || !tf->onnxruntimemodel) {
+		clear_all_buffers(tf, true);
 		if (tf->source) {
 			obs_source_skip_video_filter(tf->source);
 		}
@@ -2410,7 +2445,8 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 		if (!skip_preview) {
 			outputBGRA = localOutputBGRA.clone();
 			
-			if (tf->debugMode && tf->stateHistory) {
+			// 마스킹 상태 표시 ([Confirmed] / [Reverse Masking] 등) - preview 옵션에 종속
+			if (tf->preview && tf->stateHistory) {
 				std::set<int> active_ids = tf->stateHistory->get_all_active_ids(maskRenderFrameId, tf->currentFrameId);
 				for (int id : active_ids) {
 					std::string mode_str;
@@ -2590,7 +2626,7 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 struct obs_audio_data *detect_filter_audio(void *data, struct obs_audio_data *audio)
 {
 	struct detect_filter *tf = reinterpret_cast<struct detect_filter *>(data);
-	if (!tf || tf->isDisabled)
+	if (!tf || tf->isDisabled || !obs_source_enabled(tf->source))
 		return audio;
 
 	std::lock_guard<std::mutex> lock(tf->audioMutex);
