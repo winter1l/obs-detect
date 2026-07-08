@@ -395,7 +395,7 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_add_int_slider(crop_group_props, "crop_bottom",
 				      obs_module_text("CropBottom"), 0, 1000, 1);
 
-	// SORT Tracking Group (항상 활성화 - 체크박스 없음)
+	// SORT Tracking Group (always enabled)
 	obs_properties_t *sort_group_props = obs_properties_create();
 	obs_properties_add_group(props, "sort_tracking", obs_module_text("SORTTracking"),
 				 OBS_GROUP_NORMAL, sort_group_props);
@@ -421,7 +421,7 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_add_path(face_ex_group_props, "reference_face_path", obs_module_text("ReferenceFaceImage"), OBS_PATH_DIRECTORY, "", nullptr);
 	obs_properties_add_float_slider(face_ex_group_props, "face_match_threshold", obs_module_text("FaceMatchThreshold"), 0.0, 1.0, 0.01);
 	obs_properties_add_float_slider(face_ex_group_props, "min_face_area_ratio", obs_module_text("MinFaceAreaRatio"), 0.0, 100.0, 0.1);
-	obs_properties_add_int_slider(face_ex_group_props, "face_inference_interval", obs_module_text("FaceInferenceInterval"), 1, 60, 1);
+	obs_properties_add_int_slider(face_ex_group_props, "face_inference_interval", obs_module_text("FaceInferenceInterval"), 5, 60, 1); // (지우지 말것) 최소값을 1에서 5로 증가했음. 왜인지는 모르겠지만 사람 혼자만 화면에 나온채로 동작을 하면, 사람 한명이 두 객체로 인식될 때가 있음(이건 모델 때문이니, 고칠 수 있는 버그라 할 수 없음(할 수 있어도 없는거라하자), 편의상 old, new로 구분). 그러나 그 과정에서, new 객체는 얼굴 인식이 진행되지만, old 객체에서 더이상 얼굴 인식을 진행하지 않음. 두 객체가 다시 하나의 객체로 인식될때, new 객체는 사라지고, old 객체 ID가 유지되면, old 객체는 여전히 얼굴 인식을 진행하지 않음. 근데 이 값을 늘리면 해결됨. (그냥 매 프레임 분석하면 꼬이는 걸로 하자.)
 	obs_properties_add_int_slider(face_ex_group_props, "max_exempt_persons", obs_module_text("MaxExemptPersons"), 0, 10, 1);
 
 	// Hide subproperties completely when unchecked
@@ -455,24 +455,8 @@ obs_properties_t *detect_filter_properties(void *data)
 	// Debug & Statistics Group (At the very bottom)
 	obs_properties_t *debug_group_props = obs_properties_create();
 	obs_properties_add_group(props, "debug_group", obs_module_text("DebugGroup"), OBS_GROUP_NORMAL, debug_group_props);
-
-	// 현재 총 지연시간 표시 (플러그인 비활성화 시 0ms<< 더 고쳐야 함)
-	{
-		double fps = 60.0;
-		struct obs_video_info ovi;
-		if (obs_get_video_info(&ovi) && ovi.fps_den > 0) {
-			fps = (double)ovi.fps_num / (double)ovi.fps_den;
-		}
-		int total_delay_frames = (tf->isDisabled || !obs_source_enabled(tf->source)) ? 0 : (tf->videoDelayFrames + tf->lookaheadDelayFrames);
-		double total_delay_ms = (fps > 0.0) ? (total_delay_frames / fps * 1000.0) : 0.0;
-		char delay_info[128];
-		snprintf(delay_info, sizeof(delay_info), "%s: %.0f ms", obs_module_text("TotalDelayDisplay"), total_delay_ms);
-		obs_properties_add_text(debug_group_props, "total_delay_display",
-					 delay_info, OBS_TEXT_INFO);
-	}
-
 	obs_properties_add_int_slider(debug_group_props, "video_delay_frames", obs_module_text("VideoDelayFrames"), 0, 10, 1);
-	obs_properties_add_bool(debug_group_props, "debug_mode", obs_module_text("DebugMode"));
+	obs_properties_add_bool(debug_group_props, "debug_mode", obs_module_text("DebugMode")); // FPS/Latency 로 바꿔
 	obs_properties_add_bool(debug_group_props, "preview", obs_module_text("Preview"));
 	obs_properties_add_bool(debug_group_props, "show_yunet_detections", obs_module_text("ShowYuNetDetections"));
 	obs_properties_add_bool(debug_group_props, "enable_face_stats", obs_module_text("ShowFaceSimilarityStats"));
@@ -606,7 +590,7 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	tf->zoomFactor = (float)obs_data_get_double(settings, "zoom_factor");
 	tf->zoomSpeedFactor = (float)obs_data_get_double(settings, "zoom_speed_factor");
 	tf->zoomObject = obs_data_get_string(settings, "zoom_object");
-	tf->sortTracking = true; // 연속 트래킹 항상 활성화 (체크박스 제거됨)
+	tf->sortTracking = true;
 	size_t maxUnseenFrames = (size_t)obs_data_get_int(settings, "max_unseen_frames");
 	if (tf->tracker.getMaxUnseenFrames() != maxUnseenFrames) {
 		tf->tracker.setMaxUnseenFrames(maxUnseenFrames);
@@ -1201,7 +1185,7 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 		tf->tracker.setScreenDimensions((float)imageBGRA.cols, (float)imageBGRA.rows);
 		objects = tf->tracker.update(tf->inferenceFrameId, objects);
 	} else {
-		// SORT 트래킹이 꺼진 경우, 원시 검출 좌표들을 가짜 임시 고유 ID와 함께 히스토리에 수동으로 기록합니다.
+		// When SORT tracking is off, track objects by assigning temporary IDs and record states to history
 		if (tf->stateHistory) {
 			std::map<int, TrackedObjectState> current_frame_states;
 			int temp_id = 1;
@@ -1251,11 +1235,10 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 				continue;
 			}
 
-			if (tf->maxExemptPersons > 0 && current_is_me_count >= tf->maxExemptPersons) {
-				continue; // Max exempt persons reached, skip inference
-			}
-
-			// Throttle Check
+			// Throttle Check: All UNKNOWN objects are checked at the interval.
+			// maxExemptPersons only blocks confirmation (IS_ME) not inference.
+			// (Inference can still run for UNKNOWN objects even if maxExemptPersons is exceeded, 
+			// but IS_ME assignment will be blocked)
 			if (tf->frameCount % tf->faceInferenceInterval == 0) {
 				if (obj.rect.area() < minPersonAreaPixels) {
 					// obs_log(LOG_INFO, "Face check skipped for obj %llu: area %.0f < min %.0f", (unsigned long long)obj.id, obj.rect.area(), minPersonAreaPixels);
@@ -1890,8 +1873,17 @@ static void face_inference_thread_loop(struct detect_filter *tf)
 				{
 					std::lock_guard<std::mutex> lock(tf->faceInferenceMutex);
 					if (is_me) {
-						tf->faceStatusCache[obj.id] = filter_data::FaceStatus::IS_ME;
-						tf->faceExemptIds.insert(obj.id);
+						// maxExemptPersons limit: do not register new IS_ME if quota is full
+						int cur_is_me = 0;
+						for (const auto &entry : tf->faceStatusCache) {
+							if (entry.second == filter_data::FaceStatus::IS_ME) cur_is_me++;
+						}
+						if (tf->maxExemptPersons <= 0 || cur_is_me < tf->maxExemptPersons) {
+							tf->faceStatusCache[obj.id] = filter_data::FaceStatus::IS_ME;
+							tf->faceExemptIds.insert(obj.id);
+						} else {
+							tf->faceStatusCache[obj.id] = filter_data::FaceStatus::NOT_ME;
+						}
 					} else {
 						tf->faceStatusCache[obj.id] = filter_data::FaceStatus::NOT_ME;
 					}
@@ -2059,14 +2051,14 @@ void detect_filter_video_tick(void *data, float seconds)
 	}
 }
 
-// 바운딩 박스 크기 확장 함수 (Padding)
+// Bounding box scaling (Padding)
 static cv::Rect2f scaleBoundingBox(const cv::Rect2f& rect, float scale) {
 	float dw = rect.width * (scale - 1.0f);
 	float dh = rect.height * (scale - 1.0f);
 	return cv::Rect2f(rect.x - dw / 2.0f, rect.y - dh / 2.0f, rect.width + dw, rect.height + dh);
 }
 
-// 렌더링 스레드에서 특정 프레임 R을 그릴 때 호출하는 마스크 도출 함수
+// Final render box for objects (confirmed/extrapolated/missing)
 static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R, const StateHistoryManager* historyManager, uint64_t current_realtime_T, int preemptiveMaskingFrames, std::string& out_mode) {
 	if (!historyManager) {
 		out_mode = "None";
@@ -2076,13 +2068,13 @@ static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R, const StateHistor
 	TrackedObjectState current_state;
 	bool exists_now = historyManager->get_object_state(R, object_id, current_state);
 
-	// 1. 현재 프레임에 완벽하게 검증(Confirmed)되고 실제 감지된 상태인 경우
+	// 1. Object exists in current frame and is confirmed (not extrapolated)
 	if (exists_now && current_state.is_confirmed && !current_state.is_extrapolated) {
 		out_mode = "Confirmed";
 		return current_state.rect;
 	}
 
-	// 2. 미래 상태 룩어헤드 탐색 (R+1부터 현재 실시간 프레임 T까지의 상태 검사)
+	// 2. Search for future state in lookup buffer (R+1 to current_realtime_T)
 	bool will_be_confirmed = false;
 	bool will_be_recovered = false;
 	uint64_t first_active_future_frame = 0;
@@ -2104,18 +2096,18 @@ static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R, const StateHistor
 		}
 	}
 
-	// 3. 최초 등장 시 역방향 마스킹 처리 (선제 마스킹, 설정된 선제 마스킹 프레임 수(0.25초)만큼 앞서서 작동)
+	// 3. Apply reverse masking for the earliest future frame (confirmed, within preemptive masking range, not confirmed in current frame)
 	if (will_be_confirmed && (first_active_future_frame > R) && (first_active_future_frame - R <= (uint64_t)preemptiveMaskingFrames) && (!exists_now || !current_state.is_confirmed)) {
 		TrackedObjectState future_active_state;
 		if (historyManager->get_object_state(first_active_future_frame, object_id, future_active_state)) {
 			out_mode = "Reverse Masking";
 			
-			// 역방향 선형 외삽을 위한 2번째 미래 프레임 탐색
+			// Get next future frame for scaling
 			TrackedObjectState next_future_state;
 			bool has_next = false;
 			uint64_t next_frame = first_active_future_frame;
 			
-			// first_active_future_frame 이후의 프레임을 버퍼에서 찾음
+			// Find next frame in buffer after first_active_future_frame
 			for (auto it = buffer.rbegin(); it != buffer.rend(); ++it) {
 				if (it->frame_id > first_active_future_frame) {
 					auto obj_it = it->objects.find(object_id);
@@ -2123,14 +2115,15 @@ static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R, const StateHistor
 						next_future_state = obj_it->second;
 						next_frame = it->frame_id;
 						has_next = true;
-						// 가장 가까운 미래 하나만 찾으면 되지만, 너무 가까우면 dx가 부정확할 수 있으므로
-						// 1~2 프레임 뒤의 것을 찾도록 놔둡니다. rbegin()부터 순회하므로, 처음 만나는 것은 가장 최신 프레임입니다.
-						// 따라서 정방향 순회(begin)로 바꾸어 탐색하는 것이 좋습니다.
+						// Get the nearest future frame (F). 
+						// It is better to find 1~2 frames ahead to avoid dx being too small and unstable.
+						// When iterating from rbegin(), the last match found is the nearest future frame.
+						// You might want to reverse the iteration order(begin()) to find the nearest one faster.
 					}
 				}
 			}
 			
-			// 가장 가까운 미래(F 이후)를 찾기 위해 begin()부터 탐색
+			// Search from begin() to find the nearest future frame (F after first_active_future_frame)
 			for (auto it = buffer.begin(); it != buffer.end(); ++it) {
 				if (it->frame_id > first_active_future_frame) {
 					auto obj_it = it->objects.find(object_id);
@@ -2138,20 +2131,20 @@ static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R, const StateHistor
 						next_future_state = obj_it->second;
 						next_frame = it->frame_id;
 						has_next = true;
-						break; // 가장 가까운 미래(F 이후 첫 프레임)에서 멈춤
+						break; // Break at the first match (nearest future frame after F)
 					}
 				}
 			}
 
 			if (has_next && next_frame > first_active_future_frame) {
-				// 속도 벡터 계산 (픽셀 / 프레임)
+				// Calculate velocity vector (Distance / Frame)
 				float dt = static_cast<float>(next_frame - first_active_future_frame);
 				float dx = (next_future_state.rect.x - future_active_state.rect.x) / dt;
 				float dy = (next_future_state.rect.y - future_active_state.rect.y) / dt;
 				float dw = (next_future_state.rect.width - future_active_state.rect.width) / dt;
 				float dh = (next_future_state.rect.height - future_active_state.rect.height) / dt;
 				
-				// 속도 너무 빠른 튀는 값 방지 제한
+				// Limit velocity to prevent overshooting
 				float max_dx = future_active_state.rect.width * 0.5f;
 				float max_dy = future_active_state.rect.height * 0.5f;
 				dx = std::max(-max_dx, std::min(max_dx, dx));
@@ -2159,7 +2152,7 @@ static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R, const StateHistor
 				dw = std::max(-max_dx, std::min(max_dx, dw));
 				dh = std::max(-max_dy, std::min(max_dy, dh));
 				
-				// 역방향 외삽 적용 (시간차 F - R)
+				// Extrapolate using velocity vector (Time = F - R)
 				float time_diff = static_cast<float>(first_active_future_frame - R);
 				cv::Rect2f extrapolated_rect;
 				extrapolated_rect.x = future_active_state.rect.x - (dx * time_diff);
@@ -2169,15 +2162,15 @@ static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R, const StateHistor
 				
 				return scaleBoundingBox(extrapolated_rect, 1.2f);
 			} else {
-				// 다음 프레임이 없으면 기존처럼 제자리 확대 적용
+				// If no next future frame is found, use the current confirmed state
 				return scaleBoundingBox(future_active_state.rect, 1.2f);
 			}
 		}
 	}
 
-	// 4. 일시 유실 구간 내삽 보간 처리
+	// 4. Handle missing frames during reverse masking period (confirmed but became extrapolated)
 	if (will_be_recovered && exists_now && current_state.is_confirmed && current_state.is_extrapolated) {
-		// 유실되기 직전 마지막 정상 감지 프레임 탐색
+		// Search for confirmed state just before masking started
 		uint64_t last_active_frame = 0;
 		TrackedObjectState left_state;
 		bool found_left = false;
@@ -2214,7 +2207,7 @@ static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R, const StateHistor
 		}
 	}
 
-	// 5. 복구 불가능한 장기 가림 상태인 경우
+	// 5. Cannot recover - confirmed but extrapolated in current frame
 	if (exists_now && current_state.is_confirmed && current_state.is_extrapolated) {
 		out_mode = "Extrapolated";
 		return current_state.rect; 
@@ -2230,7 +2223,7 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 
 	struct detect_filter *tf = reinterpret_cast<detect_filter *>(data);
 
-	// FPS 기반 룩어헤드 및 선제 마스킹 프레임 갱신 (0.5초 / 0.25초 기준)
+	// FPS-based update for lookahead and preemptive masking frames (0.5s / 0.25s)
 	double fps = 60.0;
 	struct obs_video_info ovi;
 	if (obs_get_video_info(&ovi) && ovi.fps_den > 0) {
@@ -2445,7 +2438,7 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 		if (!skip_preview) {
 			outputBGRA = localOutputBGRA.clone();
 			
-			// 마스킹 상태 표시 ([Confirmed] / [Reverse Masking] 등) - preview 옵션에 종속
+			// Mask status display ([Confirmed] / [Reverse Masking] etc.) - Depends on preview option
 			if (tf->preview && tf->stateHistory) {
 				std::set<int> active_ids = tf->stateHistory->get_all_active_ids(maskRenderFrameId, tf->currentFrameId);
 				for (int id : active_ids) {
@@ -2488,7 +2481,7 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 				std::set<int> active_ids = tf->stateHistory->get_all_active_ids(maskRenderFrameId, tf->currentFrameId);
 				for (int id : active_ids) {
 					if (tf->enableFaceExclusion && tf->faceExemptIds.count(id)) {
-						continue; // 대상 얼굴로 확정된 경우 마스킹 렌더링에서 완전 제외
+						continue; // Skip if face is excluded from masking
 					}
 					if (num_mask_rects >= 64) break;
 					

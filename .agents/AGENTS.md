@@ -31,3 +31,5 @@
 ## 5. 릴리즈 및 설치 패키지 배포
 * **GitHub Actions 자동화**: 본 프로젝트는 공식 OBS 플러그인 템플릿의 빌드 스크립트를 내장하고 있어 `.github/workflows`를 통한 자동화된 CI/CD 배포를 지원합니다.
 * **로컬 Windows 빌드**: 만약 사용자(개발자)의 로컬 윈도우 환경에서 수동으로 `.exe` 인스톨러를 제작해야 한다면, CPack 대신 `build/` 디렉터리에 생성된 `installer-Windows.generated.iss` 파일을 **Inno Setup (iscc.exe)** 프로그램을 통해 직접 컴파일해야 합니다.
+
+* 코드 주석은 항상 영어로 작성합니다.
