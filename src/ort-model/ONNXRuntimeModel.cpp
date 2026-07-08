@@ -695,10 +695,10 @@ bool ONNXRuntimeModel::copy_d3d11_texture(gs_texture_t *obsSourceTexture)
 	if (!obsTex) return false;
 
 	// Acquire sync write lock (Key 0)
-	HRESULT hr = d3d11KeyedMutex_->AcquireSync(0, 33); // 33ms timeout to prevent deadlock
+	HRESULT hr = d3d11KeyedMutex_->AcquireSync(0, 0); // 0ms timeout to strictly prevent blocking OBS main thread
 	if (FAILED(hr)) {
 		if (hr == WAIT_TIMEOUT) {
-			obs_log(LOG_WARNING, "GPU Zero-Copy: D3D11 Keyed Mutex acquire timeout.");
+			// Expected when inference is busy; just skip frame safely.
 		}
 		return false;
 	}

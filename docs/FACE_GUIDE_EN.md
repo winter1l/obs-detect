@@ -70,7 +70,7 @@ Since you don't always face the camera directly, slightly turned photos are help
 ## Recommended Values
 ### Person Object
 - **Face Match Similarity Threshold**: 0.60
-- **Minimum Object Size for Recognition**: 19.00
+- **Minimum Object Size for Recognition**: 15.00
 - **Face Recognition Check Interval (Frames)**: 15
 - **Max Exempt Objects Limit**: *(Set this to the total number of people you want to exclude. 0 means unlimited.)*
 ### Face Object

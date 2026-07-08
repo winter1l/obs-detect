@@ -74,7 +74,7 @@ This guide explains recommended values for blurring Person and Face objects duri
   - The minimum object size required to perform face recognition.
     - **This refers to the size of the object in the non-face object category!**
   - This option helps prevent false matches with distant passersby who are too far away.
-  - Recommended: Person `19.00`, Face `0.60`
+  - Recommended: Person `15.00`, Face `0.60`
 - **Face Recognition Check Interval (Frames)**
   - Face recognition is performed every N frames.
   - A shorter interval is fine if performance allows, but be aware that another person's similarity score could spike above the threshold momentarily.

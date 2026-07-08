@@ -501,7 +501,7 @@ void detect_filter_defaults(obs_data_t *settings)
 
 	obs_data_set_default_bool(settings, "debug_mode", false);
 	obs_data_set_default_double(settings, "face_match_threshold", 0.6);
-	obs_data_set_default_double(settings, "min_face_area_ratio", 19.0);
+	obs_data_set_default_double(settings, "min_face_area_ratio", 15.0);
 	obs_data_set_default_int(settings, "face_inference_interval", 30);
 	obs_data_set_default_int(settings, "max_exempt_persons", 1);
 	obs_data_set_default_bool(settings, "enable_face_stats", false);
@@ -554,7 +554,7 @@ void detect_filter_update(void *data, obs_data_t *settings)
 
 	struct detect_filter *tf = reinterpret_cast<detect_filter *>(data);
 
-	int targetVersion = ++tf->settingsVersion;
+	int targetVersion = tf->settingsVersion; // Will be incremented later if queueing loadTask
 
 	tf->preview = obs_data_get_bool(settings, "preview");
 
@@ -683,6 +683,7 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	}
 
 	if (reinitialize || needsFaceLoader || (!newEnableFaceExclusion && !tf->referenceFaceFeatures.empty())) {
+		targetVersion = ++tf->settingsVersion;
 		tf->isModelLoading = true;
 
 		std::string modelFilepath_source = "";
@@ -717,7 +718,7 @@ void detect_filter_update(void *data, obs_data_t *settings)
 			}
 
 			if (modelFilepath_rawPtr) {
-				modelFilepath_source = modelFilepath_rawPtr;
+				modelFilepath_source = std::string(modelFilepath_rawPtr);
 				bfree(modelFilepath_rawPtr);
 			} else {
 				if (!invalidModel) {
@@ -734,6 +735,18 @@ void detect_filter_update(void *data, obs_data_t *settings)
 		}
 
 		auto loadTask = [tf, targetVersion, reinitialize, needsFaceLoader, newUseGpu, newNumThreads, newModelSize, modelFilepath_source, newEnableFaceExclusion, newRefPath, refPathChanged]() {
+			// Ensure isModelLoading is safely reset if this is the last queued task
+			struct ScopedReset {
+				detect_filter* t;
+				int tv;
+				ScopedReset(detect_filter* tf, int v) : t(tf), tv(v) {}
+				~ScopedReset() {
+					if (t->settingsVersion == tv) {
+						t->isModelLoading = false;
+					}
+				}
+			} reset_guard(tf, targetVersion);
+
 			if (tf->settingsVersion != targetVersion) {
 				return;
 			}
@@ -839,7 +852,7 @@ void detect_filter_update(void *data, obs_data_t *settings)
 						tempFeatures = tf->referenceFaceFeatures;
 					}
 
-					if (!tempYunet || !tempSface) {
+					if (!tempYunet || !tempSface || needsFaceLoader) {
 						char *yunet_raw = obs_module_file("models/face_detection_yunet_2023mar.onnx");
 						char *sface_raw = obs_module_file("models/face_recognition_sface_2021dec.onnx");
 						
@@ -962,14 +975,29 @@ void detect_filter_update(void *data, obs_data_t *settings)
 					tf->sfaceModel = tempSface;
 					tf->referenceFaceFeatures = std::move(tempFeatures);
 					tf->referenceFacesAttempted = true;
+					
+					if (refPathChanged) {
+						std::lock_guard<std::mutex> out_lock(tf->outputLock);
+						tf->faceStatusCache.clear();
+						tf->faceSimilarityCache.clear();
+						tf->faceExemptIds.clear();
+						{
+							std::lock_guard<std::mutex> d_lock(tf->debugFaceMutex);
+							tf->debugFaceBoxes.clear();
+						}
+					}
 				} else {
 					tf->yunetModel.reset();
 					tf->sfaceModel.reset();
 					tf->referenceFaceFeatures.clear();
 					tf->referenceFacesAttempted = false;
-					tf->faceStatusCache.clear();
-					tf->faceSimilarityCache.clear();
-					tf->faceExemptIds.clear();
+					
+					{
+						std::lock_guard<std::mutex> out_lock(tf->outputLock);
+						tf->faceStatusCache.clear();
+						tf->faceSimilarityCache.clear();
+						tf->faceExemptIds.clear();
+					}
 					{
 						std::lock_guard<std::mutex> d_lock(tf->debugFaceMutex);
 						tf->debugFaceBoxes.clear();
@@ -986,7 +1014,6 @@ void detect_filter_update(void *data, obs_data_t *settings)
 			}
 
 			tf->isDisabled = false;
-			tf->isModelLoading = false;
 		};
 
 		{
@@ -1006,9 +1033,13 @@ void detect_filter_update(void *data, obs_data_t *settings)
 			tf->sfaceModel.reset();
 			tf->referenceFaceFeatures.clear();
 			tf->referenceFacesAttempted = false;
-			tf->faceStatusCache.clear();
-			tf->faceSimilarityCache.clear();
-			tf->faceExemptIds.clear();
+			
+			{
+				std::lock_guard<std::mutex> out_lock(tf->outputLock);
+				tf->faceStatusCache.clear();
+				tf->faceSimilarityCache.clear();
+				tf->faceExemptIds.clear();
+			}
 			{
 				std::lock_guard<std::mutex> d_lock(tf->debugFaceMutex);
 				tf->debugFaceBoxes.clear();
@@ -2306,16 +2337,19 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 			}
 
 			if (tf->onnxruntimemodel->is_gpu_pipeline_ready()) {
-				if (tf->onnxruntimemodel->copy_d3d11_texture(render_tex)) {
-					run_gpu = true;
-
-					std::unique_lock<std::mutex> lock(tf->inferenceMutex, std::try_to_lock);
-					if (lock.owns_lock() && !tf->isInferencing) {
+				std::unique_lock<std::mutex> lock(tf->inferenceMutex, std::try_to_lock);
+				if (lock.owns_lock() && !tf->isInferencing) {
+					if (tf->onnxruntimemodel->copy_d3d11_texture(render_tex)) {
+						run_gpu = true;
 						tf->useGpuZeroCopyCurrentFrame = true;
 						tf->inferenceFrameId = tf->currentFrameId; // Fix GPU frame id being stuck at 0
 						tf->inferenceFrameReady = true;
 						tf->inferenceCV.notify_one();
 					}
+				} else {
+					// Inference thread is busy. Skip texture copy to prevent blocking the OBS main thread.
+					// We set run_gpu to true so it skips the CPU stagesurface map fallback as well.
+					run_gpu = true;
 				}
 			}
 		}
@@ -2421,9 +2455,9 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 			if (tf->previewHistory.empty()) {
 				skip_preview = true;
 			} else {
-				auto it = tf->previewHistory.upper_bound(renderFrameId);
+				auto it = tf->previewHistory.upper_bound(maskRenderFrameId);
 				if (it != tf->previewHistory.begin()) {
-					--it; // Closest available frame <= renderFrameId
+					--it; // Closest available frame <= maskRenderFrameId
 					localOutputBGRA = it->second;
 				} else {
 					localOutputBGRA = tf->previewHistory.begin()->second;
@@ -2578,7 +2612,7 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 		}
 		
 		if (!skip_preview && (tf->preview || tf->debugMode || tf->enableFaceStats)) {
-			if (!tf->previewTexture || tf->lastTexWidth != width || tf->lastTexHeight != height) {
+			if (!tf->previewTexture || gs_texture_get_width(tf->previewTexture) != width || gs_texture_get_height(tf->previewTexture) != height) {
 				if (tf->previewTexture) gs_texture_destroy(tf->previewTexture);
 				tf->previewTexture = gs_texture_create(width, height, GS_BGRA, 1,
 							      (const uint8_t **)&outputBGRA.data, GS_DYNAMIC);
