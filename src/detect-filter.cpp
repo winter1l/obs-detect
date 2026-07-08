@@ -611,9 +611,7 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	tf->maxExemptPersons = (int)obs_data_get_int(settings, "max_exempt_persons");
 	tf->minHitFrames = (int)obs_data_get_int(settings, "min_hit_frames");
 	tf->enableFaceStats = obs_data_get_bool(settings, "enable_face_stats");
-	tf->enableFaceStatsLog = false;
 	tf->enableSimilarityLog = obs_data_get_bool(settings, "enable_similarity_log");
-	tf->faceStatsLogPath = "";
 	tf->showYuNetDetections = obs_data_get_bool(settings, "show_yunet_detections");
 
 	if (tf->tracker.getMinHitFrames() != tf->minHitFrames) {
@@ -1881,27 +1879,6 @@ static void face_inference_thread_loop(struct detect_filter *tf)
 						int bin = std::max(0, std::min(9, (int)(max_sim * 10.0f)));
 						tf->similarityHistogram[bin]++;
 					}
-
-					if (!tf->faceStatsLogPath.empty() && tf->enableFaceStatsLog) {
-						std::string logPath = tf->faceStatsLogPath;
-						float sim_val = max_sim;
-						uint64_t oid = obj.id;
-						bool is_me_val = is_me;
-						{
-							std::lock_guard<std::mutex> lock(tf->ioMutex);
-							tf->ioQueue.push_back([logPath, sim_val, oid, is_me_val]() {
-								std::ofstream f(logPath, std::ios::app);
-								if (f.is_open()) {
-									auto now = std::chrono::system_clock::now();
-									auto in_time_t = std::chrono::system_clock::to_time_t(now);
-									char time_buf[100];
-									std::strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", std::localtime(&in_time_t));
-									f << time_buf << "," << oid << "," << sim_val << "," << (is_me_val ? "IS_ME" : "NOT_ME") << "\n";
-								}
-							});
-						}
-						tf->ioCV.notify_one();
-					}
 				} else {
 					// obs_log(LOG_INFO, "No face detected in cropped region for obj %llu", (unsigned long long)obj.id);
 				}
@@ -2143,32 +2120,17 @@ static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R, const StateHistor
 			bool has_next = false;
 			uint64_t next_frame = first_active_future_frame;
 			
-			// Find next frame in buffer after first_active_future_frame
-			for (auto it = buffer.rbegin(); it != buffer.rend(); ++it) {
-				if (it->frame_id > first_active_future_frame) {
-					auto obj_it = it->objects.find(object_id);
-					if (obj_it != it->objects.end() && obj_it->second.is_confirmed) {
-						next_future_state = obj_it->second;
-						next_frame = it->frame_id;
-						has_next = true;
-						// Get the nearest future frame (F). 
-						// It is better to find 1~2 frames ahead to avoid dx being too small and unstable.
-						// When iterating from rbegin(), the last match found is the nearest future frame.
-						// You might want to reverse the iteration order(begin()) to find the nearest one faster.
-					}
-				}
-			}
-			
-			// Search from begin() to find the nearest future frame (F after first_active_future_frame)
+			// Find the furthest confirmed frame within a window of 10 frames to calculate a stable velocity
 			for (auto it = buffer.begin(); it != buffer.end(); ++it) {
-				if (it->frame_id > first_active_future_frame) {
+				if (it->frame_id > first_active_future_frame && it->frame_id <= first_active_future_frame + 10) {
 					auto obj_it = it->objects.find(object_id);
 					if (obj_it != it->objects.end() && obj_it->second.is_confirmed && !obj_it->second.is_extrapolated) {
 						next_future_state = obj_it->second;
 						next_frame = it->frame_id;
 						has_next = true;
-						break; // Break at the first match (nearest future frame after F)
 					}
+				} else if (it->frame_id > first_active_future_frame + 10) {
+					break;
 				}
 			}
 
@@ -2266,7 +2228,8 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 		fps = (double)ovi.fps_num / (double)ovi.fps_den;
 	}
 	int newLookahead = (int)round(0.5 * fps);
-	int newPreemptive = (int)round(0.25 * fps);
+	// Compensate for the tracker's confirmation delay (minHitFrames) so the user gets a true 0.25s preemptive mask
+	int newPreemptive = (int)round(0.25 * fps) + tf->minHitFrames;
 
 	if (tf->lookaheadDelayFrames != newLookahead || tf->preemptiveMaskingFrames != newPreemptive) {
 		std::lock_guard<std::mutex> lock(tf->audioMutex);

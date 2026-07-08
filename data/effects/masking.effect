@@ -34,7 +34,7 @@ uniform float2 tex_size;
 
 float GetMaskVal(float2 uv)
 {
-	float max_alpha = 0.0;
+	float sum_alpha = 0.0;
 	float2 pixel_pos = uv * tex_size;
 
 	for (int i = 0; i < 64; ++i) {
@@ -59,9 +59,10 @@ float GetMaskVal(float2 uv)
 		} else {
 			alpha = dist <= 0.0 ? 1.0 : 0.0;
 		}
-		max_alpha = max(max_alpha, alpha);
+		// Screen Blending: A + B - (A * B)
+		sum_alpha = sum_alpha + alpha - (sum_alpha * alpha);
 	}
-	return max_alpha;
+	return sum_alpha;
 }
 
 uniform texture2d base_image;

@@ -83,9 +83,7 @@ struct filter_data {
 	
 	// Face Statistics
 	bool enableFaceStats;
-	bool enableFaceStatsLog;
 	bool enableSimilarityLog;
-	std::string faceStatsLogPath;
 	std::mutex statsMutex;
 	int statTotalChecks = 0;
 	int statIsMe = 0;
