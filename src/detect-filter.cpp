@@ -47,6 +47,8 @@
 #include "ort-model/YOLOv8FaceONNX.hpp"
 #include "yunet/YuNet.h"
 
+extern "C" void emit_face_exclusion_update(int count);
+
 #define EXTERNAL_MODEL_SIZE "EXTERNAL_MODEL"
 #define FACE_YUNET_MODEL_SIZE "FACE_YUNET"
 #define FACE_YOLO_N_MODEL_SIZE "FACE_YOLO_N"
@@ -1097,6 +1099,8 @@ void detect_filter_deactivate(void *data)
 	struct detect_filter *tf = reinterpret_cast<detect_filter *>(data);
 	tf->isDisabled = true;
 	clear_all_buffers(tf, false);
+	tf->last_excluded_count = -1;
+	emit_face_exclusion_update(0);
 }
 
 /**                   FILTER CORE                     */
@@ -1643,6 +1647,7 @@ void detect_filter_destroy(void *data)
 	struct detect_filter *tf = reinterpret_cast<detect_filter *>(data);
 
 	if (tf) {
+		emit_face_exclusion_update(0);
 		tf->isDisabled = true;
 
 		tf->stopInferenceThread = true;
@@ -2510,11 +2515,13 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 			vec4 mask_rects[64];
 			memset(mask_rects, 0, sizeof(vec4) * 64);
 			int num_mask_rects = 0;
+			int current_excluded_count = 0;
 			
 			if (tf->stateHistory) {
 				std::set<int> active_ids = tf->stateHistory->get_all_active_ids(maskRenderFrameId, tf->currentFrameId);
 				for (int id : active_ids) {
 					if (tf->enableFaceExclusion && tf->faceExemptIds.count(id)) {
+						current_excluded_count++;
 						continue; // Skip if face is excluded from masking
 					}
 					if (num_mask_rects >= 64) break;
@@ -2542,6 +2549,18 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 							rect.height / (float)height);
 						num_mask_rects++;
 					}
+				}
+			}
+
+			if (tf->enableFaceExclusion) {
+				if (tf->last_excluded_count != current_excluded_count) {
+					tf->last_excluded_count = current_excluded_count;
+					emit_face_exclusion_update(current_excluded_count);
+				}
+			} else {
+				if (tf->last_excluded_count != 0) {
+					tf->last_excluded_count = 0;
+					emit_face_exclusion_update(0);
 				}
 			}
 
