@@ -4,8 +4,8 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/common/bootstrap.cmake" NO_POLICY_SCO
 
 project(${_name} VERSION ${_version})
 
-option(ENABLE_FRONTEND_API "Use obs-frontend-api for UI functionality" OFF)
-option(ENABLE_QT "Use Qt functionality" OFF)
+option(ENABLE_FRONTEND_API "Use obs-frontend-api for UI functionality" ON)
+option(ENABLE_QT "Use Qt functionality" ON)
 
 include(compilerconfig)
 include(defaults)
@@ -102,10 +102,3 @@ set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_nam
 if(WIN32)
   target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE d3d11.lib d3dcompiler.lib)
 endif()
-
-
-if(WIN32)
-  add_executable(gpu_test_harness tests/verify_gpu_harness.cpp)
-  target_link_libraries(gpu_test_harness PRIVATE d3d11 d3d12 dxgi d3dcompiler)
-endif()
-
