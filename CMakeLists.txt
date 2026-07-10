@@ -103,7 +103,7 @@ if(WIN32)
   target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE d3d11.lib d3dcompiler.lib)
 endif()
 
-if(OS_LINUX)
+if(OS_LINUX OR OS_MACOS)
   target_compile_options(
     ${CMAKE_PROJECT_NAME} PRIVATE -Wno-error=conversion -Wno-error=deprecated-declarations -Wno-error=sign-compare
                                   -Wno-error=unused-parameter -Wno-error=unused-variable)
