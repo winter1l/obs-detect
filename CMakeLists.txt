@@ -102,3 +102,9 @@ set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_nam
 if(WIN32)
   target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE d3d11.lib d3dcompiler.lib)
 endif()
+
+if(OS_LINUX)
+  target_compile_options(
+    ${CMAKE_PROJECT_NAME} PRIVATE -Wno-error=conversion -Wno-error=deprecated-declarations -Wno-error=sign-compare
+                                  -Wno-error=unused-parameter -Wno-error=unused-variable)
+endif()
