@@ -43,6 +43,9 @@
 #include "obs-utils/obs-utils.h"
 #include "ort-model/utils.hpp"
 #include "detect-filter-utils.h"
+#include "FrameUtils.h"
+#include "InferenceSafety.h"
+#include "MaskGeometry.h"
 #include "edgeyolo/edgeyolo_onnxruntime.hpp"
 #include "ort-model/YOLOv8FaceONNX.hpp"
 #include "yunet/YuNet.h"
@@ -425,11 +428,20 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_add_float_slider(face_ex_group_props, "min_face_area_ratio", obs_module_text("MinFaceAreaRatio"), 0.0, 100.0, 0.1);
 	obs_properties_add_int_slider(face_ex_group_props, "face_inference_interval", obs_module_text("FaceInferenceInterval"), 5, 60, 1); // (지우지 말것) 최소값을 1에서 5로 증가했음. 왜인지는 모르겠지만 사람 혼자만 화면에 나온채로 동작을 하면, 사람 한명이 두 객체로 인식될 때가 있음(이건 모델 때문이니, 고칠 수 있는 버그라 할 수 없음(할 수 있어도 없는거라하자), 편의상 old, new로 구분). 그러나 그 과정에서, new 객체는 얼굴 인식이 진행되지만, old 객체에서 더이상 얼굴 인식을 진행하지 않음. 두 객체가 다시 하나의 객체로 인식될때, new 객체는 사라지고, old 객체 ID가 유지되면, old 객체는 여전히 얼굴 인식을 진행하지 않음. 근데 이 값을 늘리면 해결됨. (그냥 매 프레임 분석하면 꼬이는 걸로 하자.)
 	obs_properties_add_int_slider(face_ex_group_props, "max_exempt_persons", obs_module_text("MaxExemptPersons"), 0, 10, 1);
+	obs_property_t *preserve_face_exclusion =
+		obs_properties_add_bool(face_ex_group_props, "preserve_face_exclusion_on_recovery",
+					obs_module_text("PreserveFaceExclusionOnRecovery"));
+	obs_property_set_long_description(
+		preserve_face_exclusion,
+		obs_module_text("PreserveFaceExclusionOnRecovery.Description"));
 
 	// Hide subproperties completely when unchecked
 	obs_property_set_modified_callback(enable_face_exclusion, [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
 		const bool enabled = obs_data_get_bool(settings, "enable_face_exclusion");
-		for (auto prop_name : {"reference_face_path", "face_match_threshold", "min_face_area_ratio", "face_inference_interval", "max_exempt_persons", "person_category"}) {
+		for (auto prop_name :
+		     {"reference_face_path", "face_match_threshold", "min_face_area_ratio",
+		      "face_inference_interval", "max_exempt_persons", "person_category",
+		      "preserve_face_exclusion_on_recovery"}) {
 			obs_property_t *prop = obs_properties_get(props_, prop_name);
 			if (prop) obs_property_set_visible(prop, enabled);
 		}
@@ -519,6 +531,7 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_string(settings, "model_size", "small");
 	obs_data_set_default_int(settings, "object_category", 0);
 	obs_data_set_default_bool(settings, "enable_face_exclusion", false);
+	obs_data_set_default_bool(settings, "preserve_face_exclusion_on_recovery", false);
 	obs_data_set_default_string(settings, "reference_face_path", "");
 	obs_data_set_default_int(settings, "person_category", -1);
 	obs_data_set_default_int(settings, "face_inference_interval", 15);
@@ -571,6 +584,10 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	tf->objectCategory = (int)obs_data_get_int(settings, "object_category");
 	bool newEnableFaceExclusion = obs_data_get_bool(settings, "enable_face_exclusion");
 	tf->enableFaceExclusion = newEnableFaceExclusion;
+	bool preserveFaceExclusionOnRecovery =
+		obs_data_get_bool(settings, "preserve_face_exclusion_on_recovery");
+	tf->preserveFaceExclusionOnRecovery = preserveFaceExclusionOnRecovery;
+	tf->faceState.setPreserveOnRecovery(preserveFaceExclusionOnRecovery);
 	const char *ref_path = obs_data_get_string(settings, "reference_face_path");
 	std::string newRefPath = (ref_path && strlen(ref_path) > 0) ? ref_path : "";
 	bool refPathChanged = (tf->referenceFacePath != newRefPath);
@@ -957,6 +974,7 @@ void detect_filter_update(void *data, obs_data_t *settings)
 				std::lock_guard<std::mutex> lock(tf->modelMutex);
 				if (reinitialize) {
 					tf->onnxruntimemodel = std::move(tempModel);
+					tf->zeroCopyRuntimeHealthy = true;
 					tf->classNames = std::move(tempClassNames);
 					tf->modelFilepath = std::move(tempModelFilepath);
 					tf->useGPU = newUseGpu;
@@ -977,10 +995,7 @@ void detect_filter_update(void *data, obs_data_t *settings)
 					tf->referenceFacesAttempted = true;
 					
 					if (refPathChanged) {
-						std::lock_guard<std::mutex> out_lock(tf->outputLock);
-						tf->faceStatusCache.clear();
-						tf->faceSimilarityCache.clear();
-						tf->faceExemptIds.clear();
+						tf->faceState.clear();
 						{
 							std::lock_guard<std::mutex> d_lock(tf->debugFaceMutex);
 							tf->debugFaceBoxes.clear();
@@ -991,13 +1006,8 @@ void detect_filter_update(void *data, obs_data_t *settings)
 					tf->sfaceModel.reset();
 					tf->referenceFaceFeatures.clear();
 					tf->referenceFacesAttempted = false;
-					
-					{
-						std::lock_guard<std::mutex> out_lock(tf->outputLock);
-						tf->faceStatusCache.clear();
-						tf->faceSimilarityCache.clear();
-						tf->faceExemptIds.clear();
-					}
+
+					tf->faceState.clear();
 					{
 						std::lock_guard<std::mutex> d_lock(tf->debugFaceMutex);
 						tf->debugFaceBoxes.clear();
@@ -1033,13 +1043,8 @@ void detect_filter_update(void *data, obs_data_t *settings)
 			tf->sfaceModel.reset();
 			tf->referenceFaceFeatures.clear();
 			tf->referenceFacesAttempted = false;
-			
-			{
-				std::lock_guard<std::mutex> out_lock(tf->outputLock);
-				tf->faceStatusCache.clear();
-				tf->faceSimilarityCache.clear();
-				tf->faceExemptIds.clear();
-			}
+
+			tf->faceState.clear();
 			{
 				std::lock_guard<std::mutex> d_lock(tf->debugFaceMutex);
 				tf->debugFaceBoxes.clear();
@@ -1060,6 +1065,11 @@ void detect_filter_activate(void *data)
 static void clear_all_buffers(struct detect_filter *tf, bool in_graphics_ctx)
 {
 	bool cleared_any = false;
+	auto faceSnapshot = tf->faceState.snapshot();
+	if (faceSnapshot && !faceSnapshot->empty()) {
+		tf->faceState.clear();
+		cleared_any = true;
+	}
 	if (!tf->delayedTextures.empty() || !tf->texturePool.empty() || !tf->delayedFrameIds.empty()) {
 		if (!in_graphics_ctx) obs_enter_graphics();
 		for (auto tex : tf->delayedTextures) gs_texture_destroy(tex);
@@ -1103,14 +1113,39 @@ void detect_filter_deactivate(void *data)
 
 /**                   FILTER CORE                     */
 
-static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
+static InferenceFrameRequirements get_inference_frame_requirements(const detect_filter *tf)
 {
+	InferenceFrameRequirements requirements;
+	requirements.cropEnabled = tf->crop_enabled;
+	requirements.faceExclusionEnabled = tf->enableFaceExclusion;
+	requirements.previewEnabled = tf->preview;
+	requirements.debugEnabled = tf->debugMode;
+	requirements.faceStatsEnabled = tf->enableFaceStats;
+	requirements.faceDebugEnabled = tf->showYuNetDetections;
+	return requirements;
+}
+
+static void run_model_inference(struct detect_filter *tf, InferenceJob job)
+{
+	struct InferenceCompletionGuard {
+		std::atomic<bool> &flag;
+		~InferenceCompletionGuard() { flag = false; }
+	} completionGuard{tf->isInferencing};
+
 	static auto last_loop_time = std::chrono::high_resolution_clock::now();
 	std::unique_lock<std::mutex> lock(tf->modelMutex);
-	if (!tf->onnxruntimemodel) {
-		tf->isInferencing = false;
+	if (!tf->onnxruntimemodel)
 		return;
-	}
+
+	cv::Mat imageBGRA = std::move(job.ownedBGRA);
+	const uint64_t inferenceFrameId = job.frameId;
+	const uint32_t sourceWidth = job.sourceWidth > 0 ? job.sourceWidth
+							 : (uint32_t)std::max(0, imageBGRA.cols);
+	const uint32_t sourceHeight = job.sourceHeight > 0 ? job.sourceHeight
+							   : (uint32_t)std::max(0, imageBGRA.rows);
+	if (sourceWidth == 0 || sourceHeight == 0)
+		return;
+
 	tf->frameCount++;
 	auto start_time = std::chrono::high_resolution_clock::now();
 
@@ -1119,38 +1154,56 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 	cv::Rect cropRect(0, 0, 1, 1);
 
 #ifdef _WIN32
-	if (tf->useGpuZeroCopyCurrentFrame && tf->onnxruntimemodel->is_gpu_pipeline_ready()) {
+	if (job.mode == InferenceMode::GPUZeroCopy && tf->onnxruntimemodel->supports_zero_copy() &&
+	    tf->onnxruntimemodel->is_gpu_pipeline_ready() && tf->zeroCopyRuntimeHealthy) {
 		try {
 			objects = tf->onnxruntimemodel->inference_gpu();
 			gpu_run_success = true;
 		} catch (const std::exception &e) {
-			obs_log(LOG_ERROR, "GPU Zero-Copy Inference failed: %s. Falling back to CPU.", e.what());
+			tf->zeroCopyRuntimeHealthy = false;
+			obs_log(LOG_ERROR,
+				"GPU Zero-Copy Inference failed: %s. Keeping prior tracks and using the owned DirectML path on the next frame.",
+				e.what());
+			return;
 		}
 	}
 #endif
 
 	if (!gpu_run_success) {
-		if (imageBGRA.empty()) {
-			tf->isInferencing = false;
+		if (imageBGRA.empty())
 			return;
-		}
 		cv::Mat inferenceFrame;
 		cropRect = cv::Rect(0, 0, imageBGRA.cols, imageBGRA.rows);
 		if (tf->crop_enabled) {
-			cropRect = cv::Rect(tf->crop_left, tf->crop_top,
-					    imageBGRA.cols - tf->crop_left - tf->crop_right,
-					    imageBGRA.rows - tf->crop_top - tf->crop_bottom);
-			cv::cvtColor(imageBGRA(cropRect), inferenceFrame, cv::COLOR_BGRA2BGR);
-		} else {
-			cv::cvtColor(imageBGRA, inferenceFrame, cv::COLOR_BGRA2BGR);
+			const int cropWidth = imageBGRA.cols - tf->crop_left - tf->crop_right;
+			const int cropHeight = imageBGRA.rows - tf->crop_top - tf->crop_bottom;
+			if (tf->crop_left < 0 || tf->crop_top < 0 || tf->crop_right < 0 ||
+			    tf->crop_bottom < 0 || cropWidth <= 0 || cropHeight <= 0) {
+				obs_log(LOG_ERROR,
+					"Inference crop is outside the source frame. Keeping prior tracks.");
+				return;
+			}
+			cropRect = cv::Rect(tf->crop_left, tf->crop_top, cropWidth, cropHeight);
+		}
+		try {
+			if (tf->crop_enabled)
+				cv::cvtColor(imageBGRA(cropRect), inferenceFrame,
+					     cv::COLOR_BGRA2BGR);
+			else
+				cv::cvtColor(imageBGRA, inferenceFrame, cv::COLOR_BGRA2BGR);
+		} catch (const cv::Exception &e) {
+			obs_log(LOG_ERROR, "Inference frame preprocessing failed: %s", e.what());
+			return;
 		}
 
 		try {
 			objects = tf->onnxruntimemodel->inference(inferenceFrame);
 		} catch (const Ort::Exception &e) {
 			obs_log(LOG_ERROR, "ONNXRuntime Exception: %s", e.what());
+			return;
 		} catch (const std::exception &e) {
 			obs_log(LOG_ERROR, "%s", e.what());
+			return;
 		}
 
 		if (tf->crop_enabled) {
@@ -1213,10 +1266,10 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 	}
 
 	if (tf->sortTracking) {
-		float screenArea = (float)(imageBGRA.cols * imageBGRA.rows);
+		float screenArea = (float)(sourceWidth * sourceHeight);
 		tf->tracker.setScreenArea(screenArea);
-		tf->tracker.setScreenDimensions((float)imageBGRA.cols, (float)imageBGRA.rows);
-		objects = tf->tracker.update(tf->inferenceFrameId, objects);
+		tf->tracker.setScreenDimensions((float)sourceWidth, (float)sourceHeight);
+		objects = tf->tracker.update(inferenceFrameId, objects);
 	} else {
 		// When SORT tracking is off, track objects by assigning temporary IDs and record states to history
 		if (tf->stateHistory) {
@@ -1227,6 +1280,7 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 				
 				TrackedObjectState state;
 				state.id = (int)obj.id;
+				state.identityEpoch = obj.identityEpoch;
 				state.rect = obj.rect;
 				state.is_confirmed = true;
 				state.is_extrapolated = false;
@@ -1234,84 +1288,64 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 				
 				current_frame_states[(int)obj.id] = state;
 			}
-			tf->stateHistory->push_frame_state(tf->inferenceFrameId, current_frame_states);
+			tf->stateHistory->push_frame_state(inferenceFrameId, current_frame_states);
 		}
 	}
 
 	std::vector<Object> all_objects; // for preview
 
-	if (tf->enableFaceExclusion && tf->sortTracking && tf->yunetModel && tf->sfaceModel && !tf->referenceFaceFeatures.empty()) {
-		std::lock_guard<std::mutex> faceLock(tf->faceInferenceMutex);
-		std::unordered_set<uint64_t> current_ids;
-		float screenArea = (float)(imageBGRA.cols * imageBGRA.rows);
-		float minPersonAreaPixels = screenArea * (tf->minFaceAreaRatio / 100.0f); // use as min person size to save perf
+	if (tf->enableFaceExclusion && tf->sortTracking) {
+		std::vector<FaceTrackIdentity> currentTracks;
+		currentTracks.reserve(objects.size());
+		for (const Object &obj : objects)
+			currentTracks.push_back({obj.id, obj.identityEpoch});
+		tf->faceState.synchronizeTracks(currentTracks);
 
-		int current_is_me_count = 0;
-		for (Object &obj : objects) {
-			current_ids.insert(obj.id);
-			if (tf->faceStatusCache.count(obj.id) && tf->faceStatusCache[obj.id] == filter_data::FaceStatus::IS_ME) {
-				current_is_me_count++;
-			}
+		bool faceModelsReady = false;
+		{
+			std::lock_guard<std::mutex> faceLock(tf->faceInferenceMutex);
+			faceModelsReady = tf->yunetModel && tf->sfaceModel &&
+					  !tf->referenceFaceFeatures.empty();
 		}
 
-		std::vector<Object> to_check;
+		if (faceModelsReady && !imageBGRA.empty()) {
+			const float screenArea = (float)(sourceWidth * sourceHeight);
+			const float minPersonAreaPixels =
+				screenArea * (tf->minFaceAreaRatio / 100.0f);
+			std::vector<Object> toCheck;
 
-		for (Object &obj : objects) {
-			if (tf->personCategory != -1 && obj.label != tf->personCategory) continue;
+			for (const Object &obj : objects) {
+				if (tf->personCategory != -1 && obj.label != tf->personCategory)
+					continue;
 
-			// Check Cache
-			if (tf->faceStatusCache.count(obj.id) && tf->faceStatusCache[obj.id] == filter_data::FaceStatus::IS_ME) {
-				tf->faceExemptIds.insert(obj.id);
-				continue; // Skip YuNet if already resolved as IS_ME
-			}
-			if (tf->faceStatusCache.count(obj.id) && tf->faceStatusCache[obj.id] == filter_data::FaceStatus::CHECKING) {
-				continue;
+				FaceTrackDecision decision =
+					tf->faceState.getDecision(obj.id, obj.identityEpoch);
+				if (decision.status == FaceStatus::IS_ME ||
+				    decision.status == FaceStatus::CHECKING)
+					continue;
+				if (tf->frameCount % tf->faceInferenceInterval != 0 ||
+				    obj.rect.area() < minPersonAreaPixels)
+					continue;
+				if (tf->faceState.beginCheck(obj.id, obj.identityEpoch))
+					toCheck.push_back(obj);
 			}
 
-			// Throttle Check: All UNKNOWN objects are checked at the interval.
-			// maxExemptPersons only blocks confirmation (IS_ME) not inference.
-			// (Inference can still run for UNKNOWN objects even if maxExemptPersons is exceeded, 
-			// but IS_ME assignment will be blocked)
-			if (tf->frameCount % tf->faceInferenceInterval == 0) {
-				if (obj.rect.area() < minPersonAreaPixels) {
-					// obs_log(LOG_INFO, "Face check skipped for obj %llu: area %.0f < min %.0f", (unsigned long long)obj.id, obj.rect.area(), minPersonAreaPixels);
-				} else {
-					tf->faceStatusCache[obj.id] = filter_data::FaceStatus::CHECKING;
-					to_check.push_back(obj);
-				}
-			} else if (!tf->faceStatusCache.count(obj.id)) {
-				tf->faceStatusCache[obj.id] = filter_data::FaceStatus::UNKNOWN;
-			}
-		}
-
-		if (!to_check.empty()) {
-			tf->faceInferenceFrame = imageBGRA.clone();
-			tf->faceInferenceQueue = to_check;
-			tf->faceInferenceCV.notify_one();
-		}
-		
-		// Cleanup lost tracks from cache and faceExemptIds
-		for (auto it = tf->faceExemptIds.begin(); it != tf->faceExemptIds.end();) {
-			if (!current_ids.count(*it)) {
-				it = tf->faceExemptIds.erase(it);
-			} else {
-				++it;
-			}
-		}
-		for (auto it = tf->faceStatusCache.begin(); it != tf->faceStatusCache.end();) {
-			if (!current_ids.count(it->first)) {
-				it = tf->faceStatusCache.erase(it);
-			} else {
-				++it;
+			if (!toCheck.empty()) {
+				std::lock_guard<std::mutex> faceLock(tf->faceInferenceMutex);
+				tf->faceInferenceFrame = imageBGRA.clone();
+				tf->faceInferenceQueue = std::move(toCheck);
+				tf->faceInferenceCV.notify_one();
 			}
 		}
 	}
 
 	if (tf->enableFaceExclusion) {
 		std::vector<Object> filtered_objects;
-		
+		auto faceSnapshot = tf->faceState.snapshot();
+
 		for (Object &obj : objects) {
-			if (tf->faceExemptIds.count(obj.id)) {
+			if (faceSnapshot &&
+			    FaceStateStore::isExempt(*faceSnapshot, obj.id, obj.identityEpoch)) {
 				obj.isExempt = true;
 			}
 
@@ -1386,7 +1420,7 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 		tf->ioCV.notify_one();
 	}
 
-	if (tf->preview || tf->maskingEnabled || tf->debugMode) {
+	if (tf->preview || tf->debugMode || tf->enableFaceStats || tf->showYuNetDetections) {
 		cv::Mat frame;
 		cv::cvtColor(imageBGRA, frame, cv::COLOR_BGRA2BGR);
 
@@ -1404,15 +1438,11 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 					if (obj.rect.area() < minPersonAreaPixels) {
 						obj.customText = "Too Small for Face Check";
 					} else {
-						float sim = 0.0f;
-						bool has_sim = false;
-						{
-							std::lock_guard<std::mutex> lock(tf->outputLock);
-							if (tf->faceSimilarityCache.count(obj.id)) {
-								sim = tf->faceSimilarityCache[obj.id];
-								has_sim = true;
-							}
-						}
+						FaceTrackDecision faceDecision =
+							tf->faceState.getDecision(
+								obj.id, obj.identityEpoch);
+						float sim = faceDecision.similarity;
+						bool has_sim = faceDecision.hasSimilarity;
 						if (has_sim) {
 							char buf[64];
 							snprintf(buf, sizeof(buf), "Sim: %.2f", sim);
@@ -1530,9 +1560,11 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 		}
 
 		std::lock_guard<std::mutex> lock(tf->outputLock);
-		tf->previewHistory[tf->inferenceFrameId] = overlay.clone();
+		tf->previewHistory[inferenceFrameId] = overlay.clone();
 		// Clean up old preview frames
-		while (!tf->previewHistory.empty() && tf->previewHistory.begin()->first < (tf->inferenceFrameId > 120 ? tf->inferenceFrameId - 120 : 0)) {
+		while (!tf->previewHistory.empty() &&
+		       tf->previewHistory.begin()->first <
+			       (inferenceFrameId > 120 ? inferenceFrameId - 120 : 0)) {
 			tf->previewHistory.erase(tf->previewHistory.begin());
 		}
 	}
@@ -1553,7 +1585,6 @@ static void run_model_inference(struct detect_filter *tf, cv::Mat imageBGRA)
 		std::lock_guard<std::mutex> lock(tf->outputLock);
 		tf->latestObjects = objects;
 	}
-	tf->isInferencing = false;
 }
 static void inference_thread_loop(struct detect_filter *tf);
 static void face_inference_thread_loop(struct detect_filter *tf);
@@ -1566,6 +1597,7 @@ void *detect_filter_create(obs_data_t *settings, obs_source_t *source)
 
 	tf->source = source;
 	tf->texrender = gs_texrender_create(GS_BGRA, GS_ZS_NONE);
+	tf->maskTexrender = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	tf->lastDetectedObjectId = -1;
 	tf->frameCount = 0;
 	tf->currentFrameId = 0;
@@ -1582,6 +1614,7 @@ void *detect_filter_create(obs_data_t *settings, obs_source_t *source)
 		{KAWASE_BLUR_EFFECT_PATH, &tf->kawaseBlurEffect},
 		{MASKING_EFFECT_PATH, &tf->maskingEffect},
 		{PIXELATE_EFFECT_PATH, &tf->pixelateEffect},
+		{MASK_SHAPE_EFFECT_PATH, &tf->maskShapeEffect},
 	};
 
 	for (auto [effectPath, effect] : effects) {
@@ -1668,6 +1701,9 @@ void detect_filter_destroy(void *data)
 
 		obs_enter_graphics();
 		gs_texrender_destroy(tf->texrender);
+		if (tf->maskTexrender) {
+			gs_texrender_destroy(tf->maskTexrender);
+		}
 		for (auto tex : tf->delayedTextures) gs_texture_destroy(tex);
 		tf->delayedTextures.clear();
 		for (auto tex : tf->texturePool) gs_texture_destroy(tex);
@@ -1678,9 +1714,6 @@ void detect_filter_destroy(void *data)
 		if (tf->previewTexture) {
 			gs_texture_destroy(tf->previewTexture);
 		}
-		if (tf->renderMaskTexture) {
-			gs_texture_destroy(tf->renderMaskTexture);
-		}
 		if (tf->baseTexture) {
 			gs_texture_destroy(tf->baseTexture);
 		}
@@ -1688,6 +1721,9 @@ void detect_filter_destroy(void *data)
 		gs_effect_destroy(tf->maskingEffect);
 		if (tf->pixelateEffect) {
 			gs_effect_destroy(tf->pixelateEffect);
+		}
+		if (tf->maskShapeEffect) {
+			gs_effect_destroy(tf->maskShapeEffect);
 		}
 		obs_leave_graphics();
 
@@ -1704,7 +1740,7 @@ static void inference_thread_loop(struct detect_filter *tf)
 {
 	obs_log(LOG_INFO, "Inference thread started");
 	while (!tf->stopInferenceThread) {
-		cv::Mat imageBGRA;
+		InferenceJob job;
 		{
 			std::unique_lock<std::mutex> lock(tf->inferenceMutex);
 			tf->inferenceCV.wait(lock, [tf] {
@@ -1715,12 +1751,11 @@ static void inference_thread_loop(struct detect_filter *tf)
 				break;
 			}
 
-			imageBGRA = std::move(tf->inferenceInputFrame);
+			job = std::move(tf->inferenceJob);
 			tf->inferenceFrameReady = false;
-			tf->isInferencing = true;
 		}
 
-		run_model_inference(tf, imageBGRA);
+		run_model_inference(tf, std::move(job));
 	}
 	obs_log(LOG_INFO, "Inference thread stopped");
 }
@@ -1752,6 +1787,8 @@ static void face_inference_thread_loop(struct detect_filter *tf)
 		}
 
 		if (imageBGRA.empty() || !local_yunet || !local_sface) {
+			for (const Object &obj : to_check)
+				tf->faceState.resetToUnknown(obj.id, obj.identityEpoch);
 			continue;
 		}
 
@@ -1808,6 +1845,7 @@ static void face_inference_thread_loop(struct detect_filter *tf)
 				}
 				
 				bool is_me = false;
+				std::optional<float> similarity;
 				if (!faces.empty()) {
 					// Only store debug boxes and sort if we actually ran YuNet in the background
 					if (!(is_already_face && has_valid_landmarks)) {
@@ -1861,11 +1899,7 @@ static void face_inference_thread_loop(struct detect_filter *tf)
 					if (tf->enableSimilarityLog) {
 						obs_log(LOG_INFO, "Face matched for obj %llu: similarity %.3f (threshold %.3f)", (unsigned long long)obj.id, max_sim, tf->faceMatchThreshold);
 					}
-					
-					{
-						std::lock_guard<std::mutex> lock(tf->outputLock);
-						tf->faceSimilarityCache[obj.id] = max_sim;
-					}
+					similarity = max_sim;
 
 					if (max_sim >= tf->faceMatchThreshold) {
 						is_me = true;
@@ -1882,28 +1916,12 @@ static void face_inference_thread_loop(struct detect_filter *tf)
 				} else {
 					// obs_log(LOG_INFO, "No face detected in cropped region for obj %llu", (unsigned long long)obj.id);
 				}
-				
-				{
-					std::lock_guard<std::mutex> lock(tf->faceInferenceMutex);
-					if (is_me) {
-						// maxExemptPersons limit: do not register new IS_ME if quota is full
-						int cur_is_me = 0;
-						for (const auto &entry : tf->faceStatusCache) {
-							if (entry.second == filter_data::FaceStatus::IS_ME) cur_is_me++;
-						}
-						if (tf->maxExemptPersons <= 0 || cur_is_me < tf->maxExemptPersons) {
-							tf->faceStatusCache[obj.id] = filter_data::FaceStatus::IS_ME;
-							tf->faceExemptIds.insert(obj.id);
-						} else {
-							tf->faceStatusCache[obj.id] = filter_data::FaceStatus::NOT_ME;
-						}
-					} else {
-						tf->faceStatusCache[obj.id] = filter_data::FaceStatus::NOT_ME;
-					}
-				}
+
+				tf->faceState.commit(obj.id, obj.identityEpoch,
+						     is_me ? FaceStatus::IS_ME : FaceStatus::NOT_ME,
+						     similarity, tf->maxExemptPersons);
 			} else {
-				std::lock_guard<std::mutex> lock(tf->faceInferenceMutex);
-				tf->faceStatusCache[obj.id] = filter_data::FaceStatus::UNKNOWN;
+				tf->faceState.resetToUnknown(obj.id, obj.identityEpoch);
 			}
 		}
 	}
@@ -1924,26 +1942,35 @@ void detect_filter_video_tick(void *data, float seconds)
 
 	bool use_gpu_zero_copy = false;
 #ifdef _WIN32
-	if (tf->useGPU == "dml" && tf->onnxruntimemodel->is_gpu_pipeline_ready()) {
-		use_gpu_zero_copy = true;
-	}
+	use_gpu_zero_copy = canUseGpuZeroCopy(tf->useGPU == USEGPU_DML,
+					      tf->onnxruntimemodel->supports_zero_copy(),
+					      tf->onnxruntimemodel->is_gpu_pipeline_ready(),
+					      tf->zeroCopyRuntimeHealthy,
+					      get_inference_frame_requirements(tf));
 #endif
 
 	cv::Mat imageBGRA;
+	uint64_t ownedFrameId = 0;
 	if (!use_gpu_zero_copy) {
 		std::unique_lock<std::mutex> lock(tf->inputBGRALock, std::try_to_lock);
 		if (!lock.owns_lock() || tf->inputBGRA.empty()) {
 			return;
 		}
 		imageBGRA = tf->inputBGRA.clone();
+		ownedFrameId = tf->inputBGRAFrameId;
 	}
 
 	if (!use_gpu_zero_copy) {
 		std::unique_lock<std::mutex> lock(tf->inferenceMutex, std::try_to_lock);
-		if (lock.owns_lock() && !tf->isInferencing && !tf->useGpuZeroCopyCurrentFrame) {
-			tf->useGpuZeroCopyCurrentFrame = false;
-			tf->inferenceInputFrame = std::move(imageBGRA);
-			tf->inferenceFrameId = tf->currentFrameId;
+		if (lock.owns_lock() && !tf->isInferencing && !tf->inferenceFrameReady &&
+		    ownedFrameId > tf->lastQueuedInferenceFrameId) {
+			tf->inferenceJob.mode = InferenceMode::OwnedBGRA;
+			tf->inferenceJob.ownedBGRA = std::move(imageBGRA);
+			tf->inferenceJob.sourceWidth = (uint32_t)tf->inferenceJob.ownedBGRA.cols;
+			tf->inferenceJob.sourceHeight = (uint32_t)tf->inferenceJob.ownedBGRA.rows;
+			tf->inferenceJob.frameId = ownedFrameId;
+			tf->lastQueuedInferenceFrameId = ownedFrameId;
+			tf->isInferencing = true;
 			tf->inferenceFrameReady = true;
 			tf->inferenceCV.notify_one();
 		}
@@ -2072,7 +2099,13 @@ static cv::Rect2f scaleBoundingBox(const cv::Rect2f& rect, float scale) {
 }
 
 // Final render box for objects (confirmed/extrapolated/missing)
-static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R, const StateHistoryManager* historyManager, uint64_t current_realtime_T, int preemptiveMaskingFrames, std::string& out_mode) {
+static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R,
+				    const StateHistoryManager *historyManager,
+				    uint64_t current_realtime_T, int preemptiveMaskingFrames,
+				    std::string &out_mode, uint64_t *out_identity_epoch = nullptr)
+{
+	if (out_identity_epoch)
+		*out_identity_epoch = 0;
 	if (!historyManager) {
 		out_mode = "None";
 		return cv::Rect2f(0, 0, 0, 0);
@@ -2084,6 +2117,8 @@ static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R, const StateHistor
 	// 1. Object exists in current frame and is confirmed (not extrapolated)
 	if (exists_now && current_state.is_confirmed && !current_state.is_extrapolated) {
 		out_mode = "Confirmed";
+		if (out_identity_epoch)
+			*out_identity_epoch = current_state.identityEpoch;
 		return current_state.rect;
 	}
 
@@ -2114,7 +2149,9 @@ static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R, const StateHistor
 		TrackedObjectState future_active_state;
 		if (historyManager->get_object_state(first_active_future_frame, object_id, future_active_state)) {
 			out_mode = "Reverse Masking";
-			
+			if (out_identity_epoch)
+				*out_identity_epoch = future_active_state.identityEpoch;
+
 			// Get next future frame for scaling
 			TrackedObjectState next_future_state;
 			bool has_next = false;
@@ -2190,6 +2227,8 @@ static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R, const StateHistor
 
 		TrackedObjectState right_state;
 		if (found_left && historyManager->get_object_state(first_active_future_frame, object_id, right_state)) {
+			if (out_identity_epoch)
+				*out_identity_epoch = right_state.identityEpoch;
 			float total_dist = static_cast<float>(first_active_future_frame - last_active_frame);
 			float current_dist = static_cast<float>(R - last_active_frame);
 			float weight = total_dist > 0 ? (current_dist / total_dist) : 0.0f;
@@ -2208,11 +2247,107 @@ static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R, const StateHistor
 	// 5. Cannot recover - confirmed but extrapolated in current frame
 	if (exists_now && current_state.is_confirmed && current_state.is_extrapolated) {
 		out_mode = "Extrapolated";
+		if (out_identity_epoch)
+			*out_identity_epoch = current_state.identityEpoch;
 		return current_state.rect; 
 	}
 
 	out_mode = "Ghost";
 	return cv::Rect2f(0, 0, 0, 0);
+}
+
+static void log_mask_failure(struct detect_filter *tf, const char *reason)
+{
+	const auto now = std::chrono::steady_clock::now();
+	if (tf->lastMaskFailureLog.time_since_epoch().count() == 0 ||
+	    now - tf->lastMaskFailureLog >= std::chrono::seconds(5)) {
+		obs_log(LOG_ERROR,
+			"Mask texture generation failed (%s). Applying full-screen masking.",
+			reason);
+		tf->lastMaskFailureLog = now;
+	}
+}
+
+static gs_texture_t *build_gpu_mask_texture(struct detect_filter *tf,
+					    const std::vector<MaskRect> &rects, uint32_t width,
+					    uint32_t height)
+{
+	constexpr float blurWorkPadding = 300.0f;
+	tf->maskForceFullscreen = false;
+	if (!tf->maskTexrender || !tf->maskShapeEffect) {
+		tf->maskForceFullscreen = true;
+		log_mask_failure(tf, "missing graphics resource");
+		return nullptr;
+	}
+
+	std::vector<MaskVertex> vertices;
+	try {
+		vertices = buildMaskVertices(rects, (float)tf->maskingFeather, blurWorkPadding);
+	} catch (const std::bad_alloc &) {
+		tf->maskForceFullscreen = true;
+		log_mask_failure(tf, "vertex allocation");
+		return nullptr;
+	}
+
+	gs_vertbuffer_t *vertexBuffer = nullptr;
+	if (!vertices.empty()) {
+		gs_render_start(true);
+		for (const MaskVertex &vertex : vertices) {
+			gs_texcoord(vertex.u, vertex.v, 0);
+			gs_texcoord(vertex.rectWidth, vertex.rectHeight, 1);
+			gs_vertex2f(vertex.x, vertex.y);
+		}
+		vertexBuffer = gs_render_save();
+		if (!vertexBuffer) {
+			tf->maskForceFullscreen = true;
+			log_mask_failure(tf, "vertex buffer creation");
+			return nullptr;
+		}
+	}
+
+	gs_texrender_reset(tf->maskTexrender);
+	if (!gs_texrender_begin(tf->maskTexrender, width, height)) {
+		if (vertexBuffer)
+			gs_vertexbuffer_destroy(vertexBuffer);
+		tf->maskForceFullscreen = true;
+		log_mask_failure(tf, "render target begin");
+		return nullptr;
+	}
+
+	struct vec4 clearColor;
+	vec4_zero(&clearColor);
+	gs_clear(GS_CLEAR_COLOR, &clearColor, 0.0f, 0);
+	gs_ortho(0.0f, (float)width, 0.0f, (float)height, -100.0f, 100.0f);
+
+	if (vertexBuffer) {
+		gs_eparam_t *feather =
+			gs_effect_get_param_by_name(tf->maskShapeEffect, "feather_pixels");
+		gs_eparam_t *workPadding = gs_effect_get_param_by_name(tf->maskShapeEffect,
+								       "blur_work_padding_pixels");
+		if (feather)
+			gs_effect_set_float(feather, (float)tf->maskingFeather);
+		if (workPadding)
+			gs_effect_set_float(workPadding, blurWorkPadding);
+
+		gs_blend_state_push();
+		gs_blend_function(GS_BLEND_ONE, GS_BLEND_ONE);
+		gs_load_vertexbuffer(vertexBuffer);
+		while (gs_effect_loop(tf->maskShapeEffect, "Draw"))
+			gs_draw(GS_TRIS, 0, 0);
+		gs_load_vertexbuffer(nullptr);
+		gs_blend_state_pop();
+	}
+
+	gs_texrender_end(tf->maskTexrender);
+	if (vertexBuffer)
+		gs_vertexbuffer_destroy(vertexBuffer);
+
+	gs_texture_t *maskTexture = gs_texrender_get_texture(tf->maskTexrender);
+	if (!maskTexture) {
+		tf->maskForceFullscreen = true;
+		log_mask_failure(tf, "render target texture");
+	}
+	return maskTexture;
 }
 
 void detect_filter_video_render(void *data, gs_effect_t *_effect)
@@ -2291,33 +2426,51 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 		bool run_gpu = false;
 
 #ifdef _WIN32
-		if (tf->useGPU == "dml" && tf->onnxruntimemodel && render_tex) {
-			if (!tf->onnxruntimemodel->is_gpu_pipeline_initialized()) {
-				ID3D11Texture2D *d3d11Tex = (ID3D11Texture2D*)gs_texture_get_obj(render_tex);
-				if (d3d11Tex) {
-					ID3D11Device *d3d11Device = nullptr;
-					d3d11Tex->GetDevice(&d3d11Device);
-					if (d3d11Device) {
-						tf->onnxruntimemodel->initialize_gpu(d3d11Device, width, height);
-						d3d11Device->Release();
+		const InferenceFrameRequirements frameRequirements =
+			get_inference_frame_requirements(tf);
+		const bool zeroCopyEligible =
+			tf->useGPU == USEGPU_DML && tf->onnxruntimemodel && render_tex &&
+			tf->onnxruntimemodel->supports_zero_copy() && tf->zeroCopyRuntimeHealthy &&
+			!requiresOwnedInferenceFrame(frameRequirements);
+		if (zeroCopyEligible) {
+			std::unique_lock<std::mutex> inferenceLock(tf->inferenceMutex,
+								   std::try_to_lock);
+			if (!inferenceLock.owns_lock() || tf->isInferencing ||
+			    tf->inferenceFrameReady) {
+				// Keep the render thread non-blocking while inference owns the GPU resources.
+				run_gpu = true;
+			} else {
+				if (!tf->onnxruntimemodel->is_gpu_pipeline_ready_for((int)width,
+										     (int)height)) {
+					ID3D11Texture2D *d3d11Tex =
+						(ID3D11Texture2D *)gs_texture_get_obj(render_tex);
+					if (d3d11Tex) {
+						ID3D11Device *d3d11Device = nullptr;
+						d3d11Tex->GetDevice(&d3d11Device);
+						if (d3d11Device) {
+							if (!tf->onnxruntimemodel->initialize_gpu(
+								    d3d11Device, width, height))
+								tf->zeroCopyRuntimeHealthy = false;
+							d3d11Device->Release();
+						}
 					}
 				}
-			}
 
-			if (tf->onnxruntimemodel->is_gpu_pipeline_ready()) {
-				std::unique_lock<std::mutex> lock(tf->inferenceMutex, std::try_to_lock);
-				if (lock.owns_lock() && !tf->isInferencing) {
+				if (tf->onnxruntimemodel->is_gpu_pipeline_ready_for((int)width,
+										    (int)height)) {
 					if (tf->onnxruntimemodel->copy_d3d11_texture(render_tex)) {
 						run_gpu = true;
-						tf->useGpuZeroCopyCurrentFrame = true;
-						tf->inferenceFrameId = tf->currentFrameId; // Fix GPU frame id being stuck at 0
+						tf->inferenceJob = InferenceJob{};
+						tf->inferenceJob.mode = InferenceMode::GPUZeroCopy;
+						tf->inferenceJob.sourceWidth = width;
+						tf->inferenceJob.sourceHeight = height;
+						tf->inferenceJob.frameId = tf->currentFrameId + 1;
+						tf->lastQueuedInferenceFrameId =
+							tf->inferenceJob.frameId;
+						tf->isInferencing = true;
 						tf->inferenceFrameReady = true;
 						tf->inferenceCV.notify_one();
 					}
-				} else {
-					// Inference thread is busy. Skip texture copy to prevent blocking the OBS main thread.
-					// We set run_gpu to true so it skips the CPU stagesurface map fallback as well.
-					run_gpu = true;
 				}
 			}
 		}
@@ -2339,11 +2492,19 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 			uint8_t *video_data;
 			uint32_t linesize;
 			if (gs_stagesurface_map(tf->stagesurface, &video_data, &linesize)) {
+				cv::Mat ownedFrame =
+					copyMappedBGRA(video_data, linesize, width, height);
+				gs_stagesurface_unmap(tf->stagesurface);
+				if (ownedFrame.empty()) {
+					if (tf->source)
+						obs_source_skip_video_filter(tf->source);
+					return;
+				}
 				{
 					std::lock_guard<std::mutex> lock(tf->inputBGRALock);
-					tf->inputBGRA = cv::Mat(height, width, CV_8UC4, video_data, linesize);
+					tf->inputBGRA = std::move(ownedFrame);
+					tf->inputBGRAFrameId = tf->currentFrameId + 1;
 				}
-				gs_stagesurface_unmap(tf->stagesurface);
 			} else {
 				if (tf->source) {
 					obs_source_skip_video_filter(tf->source);
@@ -2475,27 +2636,43 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 			gs_effect_get_param_by_name(tf->maskingEffect, "color");
 
 		if (tf->maskingEnabled) {
-			vec4 mask_rects[64];
-			memset(mask_rects, 0, sizeof(vec4) * 64);
-			int num_mask_rects = 0;
+			std::vector<MaskRect> maskRects;
 			int current_excluded_count = 0;
-			
-			if (tf->stateHistory) {
-				std::set<int> active_ids = tf->stateHistory->get_all_active_ids(maskRenderFrameId, tf->currentFrameId);
-				for (int id : active_ids) {
-					if (tf->enableFaceExclusion && tf->faceExemptIds.count(id)) {
-						current_excluded_count++;
-						continue; // Skip if face is excluded from masking
-					}
-					if (num_mask_rects >= 64) break;
-					
-					std::string mode_str;
-					cv::Rect2f rect = getFinalRenderBox(id, maskRenderFrameId, tf->stateHistory.get(), tf->currentFrameId, tf->preemptiveMaskingFrames, mode_str);
-					
-					if (rect.width > 0 && rect.height > 0 && mode_str != "Ghost") {
+			bool maskCollectionFailed = false;
+			auto faceSnapshot = tf->faceState.snapshot();
+			try {
+				if (tf->stateHistory) {
+					std::set<int> active_ids =
+						tf->stateHistory->get_all_active_ids(
+							maskRenderFrameId, tf->currentFrameId);
+					maskRects.reserve(active_ids.size());
+					for (int id : active_ids) {
+						std::string mode_str;
+						uint64_t identityEpoch = 0;
+						cv::Rect2f rect = getFinalRenderBox(
+							id, maskRenderFrameId,
+							tf->stateHistory.get(), tf->currentFrameId,
+							tf->preemptiveMaskingFrames, mode_str,
+							&identityEpoch);
+						if (rect.width <= 0 || rect.height <= 0 ||
+						    mode_str == "Ghost")
+							continue;
+
+						if (tf->enableFaceExclusion && faceSnapshot &&
+						    FaceStateStore::isExempt(
+							    *faceSnapshot, (uint64_t)id,
+							    identityEpoch,
+							    tf->preserveFaceExclusionOnRecovery)) {
+							current_excluded_count++;
+							continue;
+						}
+
 						float expansion = 0.0f;
 						if (tf->maskingDynamicExpansion) {
-							expansion = tf->maskingDynamicExpansionBase + (rect.height * tf->maskingDynamicExpansionRatio);
+							expansion =
+								tf->maskingDynamicExpansionBase +
+								(rect.height *
+								 tf->maskingDynamicExpansionRatio);
 						} else if (tf->maskingDilateIterations > 0) {
 							expansion = (float)tf->maskingDilateIterations;
 						}
@@ -2505,14 +2682,14 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 							rect.width += expansion * 2.0f;
 							rect.height += expansion * 2.0f;
 						}
-						vec4_set(&mask_rects[num_mask_rects], 
-							rect.x / (float)width, 
-							rect.y / (float)height, 
-							rect.width / (float)width, 
-							rect.height / (float)height);
-						num_mask_rects++;
+						maskRects.push_back(
+							{rect.x, rect.y, rect.width, rect.height});
 					}
 				}
+			} catch (const std::bad_alloc &) {
+				maskCollectionFailed = true;
+				tf->maskForceFullscreen = true;
+				log_mask_failure(tf, "rectangle allocation");
 			}
 
 			if (tf->enableFaceExclusion) {
@@ -2527,26 +2704,28 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 				}
 			}
 
-			auto apply_masks_to_effect = [&](gs_effect_t* effect) {
-				if (!effect) return;
-				gs_eparam_t *rectsParam = gs_effect_get_param_by_name(effect, "mask_rects");
-				gs_eparam_t *numRectsParam = gs_effect_get_param_by_name(effect, "num_mask_rects");
-				gs_eparam_t *featherParam = gs_effect_get_param_by_name(effect, "feather_pixels");
-				gs_eparam_t *texSizeParam = gs_effect_get_param_by_name(effect, "tex_size");
-
-				if (rectsParam) gs_effect_set_val(rectsParam, mask_rects, sizeof(vec4) * 64);
-				if (numRectsParam) gs_effect_set_int(numRectsParam, num_mask_rects);
-				if (featherParam) gs_effect_set_float(featherParam, (float)tf->maskingFeather);
-				if (texSizeParam) {
-					vec2 texsize_vec;
-					vec2_set(&texsize_vec, (float)width, (float)height);
-					gs_effect_set_vec2(texSizeParam, &texsize_vec);
-				}
+			gs_texture_t *maskTexture =
+				maskCollectionFailed
+					? nullptr
+					: build_gpu_mask_texture(tf, maskRects, width, height);
+			if (shouldForceFullscreenMask(!maskCollectionFailed,
+						      maskTexture != nullptr))
+				tf->maskForceFullscreen = true;
+			auto applyMaskTexture = [&](gs_effect_t *effect) {
+				if (!effect)
+					return;
+				gs_eparam_t *textureParam =
+					gs_effect_get_param_by_name(effect, "mask_texture");
+				gs_eparam_t *forceParam =
+					gs_effect_get_param_by_name(effect, "force_full_mask");
+				if (textureParam && maskTexture)
+					gs_effect_set_texture(textureParam, maskTexture);
+				if (forceParam)
+					gs_effect_set_bool(forceParam, tf->maskForceFullscreen);
 			};
-
-			apply_masks_to_effect(tf->maskingEffect);
-			apply_masks_to_effect(tf->kawaseBlurEffect);
-			apply_masks_to_effect(tf->pixelateEffect);
+			applyMaskTexture(tf->maskingEffect);
+			applyMaskTexture(tf->kawaseBlurEffect);
+			applyMaskTexture(tf->pixelateEffect);
 
 			// Preserve the original frame for blending
 			if (!tf->baseTexture || gs_texture_get_width(tf->baseTexture) != width || gs_texture_get_height(tf->baseTexture) != height) {
@@ -2558,10 +2737,10 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 			if (tf->maskingType == "output_mask") {
 				technique_name = "DrawMask";
 			} else if (tf->maskingType == "blur") {
-				tex = blur_image(tf, width, height, nullptr, delayed_tex); // pass delayed_tex as source
+				tex = blur_image(tf, width, height, maskTexture, delayed_tex);
 				destroy_tex = true; // blur_image creates a new texture
 			} else if (tf->maskingType == "pixelate") {
-				tex = pixelate_image(tf, width, height, nullptr,
+				tex = pixelate_image(tf, width, height, maskTexture,
 						     (float)tf->maskingBlurRadius, delayed_tex);
 				destroy_tex = true;
 			} else if (tf->maskingType == "transparent") {

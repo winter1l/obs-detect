@@ -4,12 +4,12 @@
 #include <obs-module.h>
 #include <util/circlebuf.h>
 #include "ort-model/ONNXRuntimeModel.h"
+#include "FaceStateStore.h"
 #include "sort/Sort.h"
 #include "sort/StateHistory.h"
 #include "yunet/YuNet.h"
 #include "sface/SFace.h"
 #include <unordered_map>
-#include <unordered_set>
 #include <chrono>
 #include <vector>
 #include <map>
@@ -23,6 +23,16 @@
 struct DebugFaceBox {
 	cv::Rect2f rect;
 	std::chrono::steady_clock::time_point timestamp;
+};
+
+enum class InferenceMode { OwnedBGRA, GPUZeroCopy };
+
+struct InferenceJob {
+	InferenceMode mode = InferenceMode::OwnedBGRA;
+	cv::Mat ownedBGRA;
+	uint32_t sourceWidth = 0;
+	uint32_t sourceHeight = 0;
+	uint64_t frameId = 0;
 };
 
 /**
@@ -41,22 +51,23 @@ struct filter_data {
 	int maxExemptPersons;
 	int minHitFrames;
 	int objectCategory;
-	bool enableFaceExclusion;
+	std::atomic<bool> enableFaceExclusion{false};
 	std::string referenceFacePath;
 	float faceMatchThreshold;
 	int personCategory;
 	float minFaceAreaRatio;
 	int faceInferenceInterval;
-
-	enum FaceStatus { UNKNOWN, CHECKING, IS_ME, NOT_ME };
-	std::unordered_map<uint64_t, FaceStatus> faceStatusCache;
-	std::unordered_map<uint64_t, float> faceSimilarityCache;
+	std::atomic<bool> preserveFaceExclusionOnRecovery{false};
+	FaceStateStore faceState;
 	std::vector<std::vector<float>> referenceFaceFeatures;
 	int last_excluded_count = -1;
 	bool referenceFacesAttempted = false;
 
 	gs_texture_t *previewTexture = nullptr;
-	gs_texture_t *renderMaskTexture = nullptr;
+	gs_texrender_t *maskTexrender = nullptr;
+	gs_effect_t *maskShapeEffect = nullptr;
+	bool maskForceFullscreen = false;
+	std::chrono::steady_clock::time_point lastMaskFailureLog;
 	uint32_t lastTexWidth = 0;
 	uint32_t lastTexHeight = 0;
 
@@ -100,7 +111,6 @@ struct filter_data {
 	// create SORT tracker
 	Sort tracker;
 	std::shared_ptr<StateHistoryManager> stateHistory;
-	std::unordered_set<uint64_t> faceExemptIds;
 
 	obs_source_t *source;
 	gs_texrender_t *texrender;
@@ -125,8 +135,9 @@ struct filter_data {
 	gs_effect_t *pixelateEffect;
 	gs_texture_t *baseTexture;
 
-	bool useGpuZeroCopyCurrentFrame = false;
+	std::atomic<bool> zeroCopyRuntimeHealthy{true};
 	cv::Mat inputBGRA;
+	uint64_t inputBGRAFrameId = 0;
 	std::mutex inputBGRALock;
 
 	// Audio sync
@@ -159,10 +170,10 @@ struct filter_data {
 	std::mutex inferenceMutex;
 	std::condition_variable inferenceCV;
 	std::atomic<bool> isInferencing;
-	cv::Mat inferenceInputFrame;
+	InferenceJob inferenceJob;
 	cv::Rect inferenceCropRect;
 	bool inferenceFrameReady;
-	uint64_t inferenceFrameId;
+	uint64_t lastQueuedInferenceFrameId = 0;
 	uint64_t frameCount;
 
 	// Face Inference background thread

@@ -1,0 +1,58 @@
+uniform float4x4 ViewProj;
+uniform float feather_pixels;
+uniform float blur_work_padding_pixels;
+
+struct VertDataIn {
+	float4 pos : POSITION;
+	float2 uv : TEXCOORD0;
+	float2 rect_size : TEXCOORD1;
+};
+
+struct VertDataOut {
+	float4 pos : POSITION;
+	float2 uv : TEXCOORD0;
+	float2 rect_size : TEXCOORD1;
+};
+
+VertDataOut VSDefault(VertDataIn v_in)
+{
+	VertDataOut vert_out;
+	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv = v_in.uv;
+	vert_out.rect_size = v_in.rect_size;
+	return vert_out;
+}
+
+float SignedBoxDistance(float2 point, float2 half_size)
+{
+	float2 d = abs(point) - half_size;
+	return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
+}
+
+float4 PSShape(VertDataOut v_in) : TARGET
+{
+	float geometry_padding = feather_pixels + blur_work_padding_pixels;
+	float2 quad_size = v_in.rect_size + geometry_padding * 2.0;
+	float2 point = (v_in.uv - 0.5) * quad_size;
+	float2 half_size = v_in.rect_size * 0.5;
+
+	float corner_radius = feather_pixels;
+	float2 rounded_half_size = max(half_size - corner_radius, 0.0);
+	float rounded_distance = SignedBoxDistance(point, rounded_half_size) - corner_radius;
+	float final_alpha = feather_pixels > 0.0
+		? smoothstep(feather_pixels, 0.0, rounded_distance)
+		: (rounded_distance <= 0.0 ? 1.0 : 0.0);
+
+	float box_distance = SignedBoxDistance(point, half_size);
+	float work_alpha = box_distance <= geometry_padding ? 1.0 : 0.0;
+	return float4(final_alpha, work_alpha, final_alpha, final_alpha);
+}
+
+technique Draw
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader = PSShape(v_in);
+	}
+}

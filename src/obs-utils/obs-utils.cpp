@@ -1,5 +1,6 @@
 #include "obs-utils.h"
 #include "plugin-support.h"
+#include "FrameUtils.h"
 
 #include <obs-module.h>
 
@@ -60,11 +61,15 @@ bool getRGBAFromStageSurface(filter_data *tf, uint32_t &width, uint32_t &height)
 	if (!gs_stagesurface_map(tf->stagesurface, &video_data, &linesize)) {
 		return false;
 	}
+	cv::Mat ownedFrame = copyMappedBGRA(video_data, linesize, width, height);
+	gs_stagesurface_unmap(tf->stagesurface);
+	if (ownedFrame.empty())
+		return false;
 	{
 		std::lock_guard<std::mutex> lock(tf->inputBGRALock);
-		tf->inputBGRA = cv::Mat(height, width, CV_8UC4, video_data, linesize);
+		tf->inputBGRA = std::move(ownedFrame);
+		tf->inputBGRAFrameId = tf->currentFrameId + 1;
 	}
-	gs_stagesurface_unmap(tf->stagesurface);
 	return true;
 }
 
@@ -80,6 +85,14 @@ gs_texture_t *blur_image(struct filter_data *tf, uint32_t width, uint32_t height
 	gs_eparam_t *image = gs_effect_get_param_by_name(tf->kawaseBlurEffect, "image");
 	gs_eparam_t *xOffset = gs_effect_get_param_by_name(tf->kawaseBlurEffect, "xOffset");
 	gs_eparam_t *yOffset = gs_effect_get_param_by_name(tf->kawaseBlurEffect, "yOffset");
+	gs_eparam_t *maskTexture =
+		gs_effect_get_param_by_name(tf->kawaseBlurEffect, "mask_texture");
+	gs_eparam_t *forceFullMask =
+		gs_effect_get_param_by_name(tf->kawaseBlurEffect, "force_full_mask");
+	if (maskTexture && alphaTexture)
+		gs_effect_set_texture(maskTexture, alphaTexture);
+	if (forceFullMask)
+		gs_effect_set_bool(forceFullMask, tf->maskForceFullscreen);
 
 	for (int i = 0; i < (int)tf->maskingBlurRadius; i++) {
 		gs_texrender_reset(tf->texrender);
@@ -123,6 +136,13 @@ gs_texture_t *pixelate_image(struct filter_data *tf, uint32_t width, uint32_t he
 	gs_eparam_t *image = gs_effect_get_param_by_name(tf->pixelateEffect, "image");
 	gs_eparam_t *pixel_size = gs_effect_get_param_by_name(tf->pixelateEffect, "pixel_size");
 	gs_eparam_t *tex_size = gs_effect_get_param_by_name(tf->pixelateEffect, "tex_size");
+	gs_eparam_t *maskTexture = gs_effect_get_param_by_name(tf->pixelateEffect, "mask_texture");
+	gs_eparam_t *forceFullMask =
+		gs_effect_get_param_by_name(tf->pixelateEffect, "force_full_mask");
+	if (maskTexture && alphaTexture)
+		gs_effect_set_texture(maskTexture, alphaTexture);
+	if (forceFullMask)
+		gs_effect_set_bool(forceFullMask, tf->maskForceFullscreen);
 
 	gs_texrender_reset(tf->texrender);
 	if (!gs_texrender_begin(tf->texrender, width, height)) {

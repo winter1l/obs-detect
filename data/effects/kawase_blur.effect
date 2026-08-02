@@ -3,9 +3,8 @@ uniform texture2d image;
 
 uniform float xOffset;
 uniform float yOffset;
-
-uniform float4 mask_rects[64];
-uniform int num_mask_rects;
+uniform texture2d mask_texture;
+uniform bool force_full_mask;
 
 sampler_state textureSampler {
 	Filter    = Linear;
@@ -31,30 +30,9 @@ VertDataOut VSDefault(VertDataOut v_in)
 	return vert_out;
 }
 
-uniform float feather_pixels;
-uniform float2 tex_size;
-
 bool IsInBounds(float2 uv)
 {
-    float2 pixel_pos = uv * tex_size;
-    // Add generous padding for blur spread + feather
-    float padding = feather_pixels + 300.0; 
-
-    for (int i = 0; i < 64; ++i) {
-        if (i >= num_mask_rects) break;
-        float4 r = mask_rects[i];
-        
-        float2 center = float2(r.x + r.z * 0.5, r.y + r.w * 0.5) * tex_size;
-        float2 half_size = float2(r.z * 0.5, r.w * 0.5) * tex_size;
-        
-        float2 d = abs(pixel_pos - center) - half_size;
-        float dist = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
-        
-        if (dist <= padding) {
-            return true;
-        }
-    }
-    return false;
+	return force_full_mask || mask_texture.Sample(textureSampler, uv).g > 0.0;
 }
 
 /**

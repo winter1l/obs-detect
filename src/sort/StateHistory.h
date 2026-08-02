@@ -10,11 +10,12 @@
 
 // 개별 객체의 상태 단위
 struct TrackedObjectState {
-	int id;
+	int id = 0;
+	uint64_t identityEpoch = 0;
 	cv::Rect_<float> rect;
-	bool is_extrapolated;
-	bool is_confirmed;
-	int hit_streak;
+	bool is_extrapolated = false;
+	bool is_confirmed = false;
+	int hit_streak = 0;
 };
 
 // 프레임 단위의 상태 이력

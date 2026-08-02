@@ -373,7 +373,14 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
 
 bool ONNXRuntimeModel::initialize_gpu(ID3D11Device* d3d11Device, int width, int height)
 {
-	if (gpu_pipeline_initialized_) return gpu_pipeline_ready_;
+	if (!supports_zero_copy()) {
+		obs_log(LOG_DEBUG, "GPU Zero-Copy: Model does not advertise zero-copy support.");
+		return false;
+	}
+	if (gpu_pipeline_initialized_ && sharedWidth_ == width && sharedHeight_ == height)
+		return gpu_pipeline_ready_;
+	if (gpu_pipeline_initialized_)
+		release_gpu_resources();
 	gpu_pipeline_initialized_ = true;
 
 	try {

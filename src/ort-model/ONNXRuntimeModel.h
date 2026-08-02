@@ -10,7 +10,7 @@
 #include <string>
 #include <tuple>
 #include <atomic>
-
+#include <stdexcept>
 
 #include "types.hpp"
 
@@ -49,6 +49,8 @@ typedef struct gs_texture gs_texture_t;
 // Generic class for ONNXRuntime models
 class ONNXRuntimeModel {
 public:
+	static constexpr bool kSupportsZeroCopy = false;
+
 	// default constructor
 	ONNXRuntimeModel() {}
 	// constructor with parameters
@@ -69,10 +71,15 @@ public:
 	virtual std::vector<Object> inference(const cv::Mat &frame) = 0;
 
 #ifdef _WIN32
+	virtual bool supports_zero_copy() const noexcept { return kSupportsZeroCopy; }
 	virtual std::vector<Object> inference_gpu() {
-		return std::vector<Object>();
+		throw std::logic_error("GPU zero-copy inference is not implemented by this model");
 	}
 	bool is_gpu_pipeline_ready() const { return gpu_pipeline_ready_; }
+	bool is_gpu_pipeline_ready_for(int width, int height) const
+	{
+		return gpu_pipeline_ready_ && sharedWidth_ == width && sharedHeight_ == height;
+	}
 	bool is_gpu_pipeline_initialized() const { return gpu_pipeline_initialized_; }
 	bool initialize_gpu(ID3D11Device* d3d11Device, int width, int height);
 	bool copy_d3d11_texture(gs_texture_t *obsSourceTexture);

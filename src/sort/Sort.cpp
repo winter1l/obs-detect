@@ -173,6 +173,7 @@ std::vector<Object> Sort::update(uint64_t frameId, const std::vector<Object> &de
 			for (auto &track : trackedObjects) {
 				TrackedObjectState state;
 				state.id = (int)track.id;
+				state.identityEpoch = track.identityEpoch;
 				state.rect = track.rect;
 				state.is_extrapolated = (track.unseenFrames > 0);
 				state.hit_streak = track.hitFrames;
@@ -193,6 +194,7 @@ std::vector<Object> Sort::update(uint64_t frameId, const std::vector<Object> &de
 			trackedObjects.push_back(detection);
 			trackedObjects.back().kf = kf; // store the Kalman filter in the object
 			trackedObjects.back().id = nextTrackID++;
+			trackedObjects.back().identityEpoch = 1;
 			trackedObjects.back().unseenFrames = 0;
 			trackedObjects.back().hitFrames = 1;
 			trackedObjects.back().trackingState = "New (1)";
@@ -204,6 +206,7 @@ std::vector<Object> Sort::update(uint64_t frameId, const std::vector<Object> &de
 			for (auto &track : trackedObjects) {
 				TrackedObjectState state;
 				state.id = (int)track.id;
+				state.identityEpoch = track.identityEpoch;
 				state.rect = track.rect;
 				state.is_extrapolated = (track.unseenFrames > 0);
 				state.hit_streak = track.hitFrames;
@@ -373,6 +376,7 @@ std::vector<Object> Sort::update(uint64_t frameId, const std::vector<Object> &de
 		
 		if (best_det_idx != -1) {
 			int j = best_det_idx;
+			trackedObjects[i].identityEpoch++;
 			// 칼만 필터의 느린 추적을 우회하고 새 대상의 위치로 즉시 이동 (Instant Teleport)
 			trackedObjects[i].rect = detections[j].rect;
 			
@@ -413,6 +417,7 @@ std::vector<Object> Sort::update(uint64_t frameId, const std::vector<Object> &de
 			trackedObjects.push_back(detections[j]);
 			trackedObjects.back().kf = kf; // store the Kalman filter in the object
 			trackedObjects.back().id = nextTrackID++;
+			trackedObjects.back().identityEpoch = 1;
 			trackedObjects.back().unseenFrames = 0;
 			trackedObjects.back().hitFrames = 1;
 			if (this->instantTrackAreaRatio > 0.0f && this->screenArea > 0.0f) {
@@ -458,6 +463,7 @@ std::vector<Object> Sort::update(uint64_t frameId, const std::vector<Object> &de
 		for (auto &track : trackedObjects) {
 			TrackedObjectState state;
 			state.id = (int)track.id;
+			state.identityEpoch = track.identityEpoch;
 			state.rect = track.rect;
 			state.is_extrapolated = (track.unseenFrames > 0);
 			state.hit_streak = track.hitFrames;
