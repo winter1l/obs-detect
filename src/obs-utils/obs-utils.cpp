@@ -74,7 +74,7 @@ bool getRGBAFromStageSurface(filter_data *tf, uint32_t &width, uint32_t &height)
 }
 
 gs_texture_t *blur_image(struct filter_data *tf, uint32_t width, uint32_t height,
-			 gs_texture_t *alphaTexture, gs_texture_t *sourceTexture)
+			 gs_texture_t *sourceTexture)
 {
 	gs_texture_t *blurredTexture = gs_texture_create(width, height, GS_BGRA, 1, nullptr, 0);
 	gs_copy_texture(blurredTexture, sourceTexture ? sourceTexture : gs_texrender_get_texture(tf->texrender));
@@ -85,14 +85,6 @@ gs_texture_t *blur_image(struct filter_data *tf, uint32_t width, uint32_t height
 	gs_eparam_t *image = gs_effect_get_param_by_name(tf->kawaseBlurEffect, "image");
 	gs_eparam_t *xOffset = gs_effect_get_param_by_name(tf->kawaseBlurEffect, "xOffset");
 	gs_eparam_t *yOffset = gs_effect_get_param_by_name(tf->kawaseBlurEffect, "yOffset");
-	gs_eparam_t *maskTexture =
-		gs_effect_get_param_by_name(tf->kawaseBlurEffect, "mask_texture");
-	gs_eparam_t *forceFullMask =
-		gs_effect_get_param_by_name(tf->kawaseBlurEffect, "force_full_mask");
-	if (maskTexture && alphaTexture)
-		gs_effect_set_texture(maskTexture, alphaTexture);
-	if (forceFullMask)
-		gs_effect_set_bool(forceFullMask, tf->maskForceFullscreen);
 
 	for (int i = 0; i < (int)tf->maskingBlurRadius; i++) {
 		gs_texrender_reset(tf->texrender);
@@ -114,7 +106,9 @@ gs_texture_t *blur_image(struct filter_data *tf, uint32_t width, uint32_t height
 		gs_blend_state_push();
 		gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
 
-		while (gs_effect_loop(tf->kawaseBlurEffect, "DrawMaskAware")) {
+		// Every pass covers the whole frame. Sampling the mask texture in these passes
+		// read back zero on D3D11, which left the masked people unblurred.
+		while (gs_effect_loop(tf->kawaseBlurEffect, "Draw")) {
 			gs_draw_sprite(blurredTexture, 0, width, height);
 		}
 		gs_blend_state_pop();

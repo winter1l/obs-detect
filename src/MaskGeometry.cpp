@@ -2,12 +2,11 @@
 
 #include <algorithm>
 
-std::vector<MaskVertex> buildMaskVertices(const std::vector<MaskRect> &rects, float featherPixels,
-					  float blurWorkPaddingPixels)
+std::vector<MaskVertex> buildMaskVertices(const std::vector<MaskRect> &rects, float featherPixels)
 {
 	std::vector<MaskVertex> vertices;
 	vertices.reserve(rects.size() * 6);
-	const float padding = std::max(0.0f, featherPixels) + std::max(0.0f, blurWorkPaddingPixels);
+	const float padding = std::max(0.0f, featherPixels);
 
 	for (const MaskRect &rect : rects) {
 		if (rect.width <= 0.0f || rect.height <= 0.0f)

@@ -3,8 +3,6 @@ uniform texture2d image;
 
 uniform float xOffset;
 uniform float yOffset;
-uniform texture2d mask_texture;
-uniform bool force_full_mask;
 
 sampler_state textureSampler {
 	Filter    = Linear;
@@ -30,11 +28,6 @@ VertDataOut VSDefault(VertDataOut v_in)
 	return vert_out;
 }
 
-bool IsInBounds(float2 uv)
-{
-	return force_full_mask || mask_texture.Sample(textureSampler, uv).g > 0.0;
-}
-
 /**
  * Standard Kawase blur
  */
@@ -50,38 +43,11 @@ float4 PSKawaseBlur(VertDataOut v_in) : TARGET
 	return sum;
 }
 
-/**
- * Mask aware Kawase blur (Optimized)
- * Only blurs the expanded region around the masks to save GPU time.
- */
-float4 PSKawaseBlurMaskAware(VertDataOut v_in) : TARGET
-{
-	if (!IsInBounds(v_in.uv)) {
-		return image.Sample(textureSampler, v_in.uv);
-	}
-
-	float4 sum = float4(0.0, 0.0, 0.0, 0.0);
-	sum += image.Sample(textureSampler, v_in.uv + float2( xOffset,  yOffset));
-	sum += image.Sample(textureSampler, v_in.uv + float2(-xOffset,  yOffset));
-	sum += image.Sample(textureSampler, v_in.uv + float2( xOffset, -yOffset));
-	sum += image.Sample(textureSampler, v_in.uv + float2(-xOffset, -yOffset));
-	return sum * 0.25;
-}
-
 technique Draw
 {
 	pass
 	{
 		vertex_shader = VSDefault(v_in);
 		pixel_shader  = PSKawaseBlur(v_in);
-	}
-}
-
-technique DrawMaskAware
-{
-	pass
-	{
-		vertex_shader = VSDefault(v_in);
-		pixel_shader  = PSKawaseBlurMaskAware(v_in);
 	}
 }

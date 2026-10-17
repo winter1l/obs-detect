@@ -1,6 +1,5 @@
 uniform float4x4 ViewProj;
 uniform float feather_pixels;
-uniform float blur_work_padding_pixels;
 
 struct VertDataIn {
 	float4 pos : POSITION;
@@ -31,7 +30,7 @@ float SignedBoxDistance(float2 offset_px, float2 half_size)
 
 float4 PSShape(VertDataOut v_in) : TARGET
 {
-	float geometry_padding = feather_pixels + blur_work_padding_pixels;
+	float geometry_padding = feather_pixels;
 	float2 quad_size = v_in.rect_size + geometry_padding * 2.0;
 	float2 offset_px = (v_in.uv - 0.5) * quad_size;
 	float2 half_size = v_in.rect_size * 0.5;
@@ -42,10 +41,7 @@ float4 PSShape(VertDataOut v_in) : TARGET
 	float final_alpha = feather_pixels > 0.0
 		? 1.0 - smoothstep(0.0, feather_pixels, rounded_distance)
 		: (rounded_distance <= 0.0 ? 1.0 : 0.0);
-
-	float box_distance = SignedBoxDistance(offset_px, half_size);
-	float work_alpha = box_distance <= geometry_padding ? 1.0 : 0.0;
-	return float4(final_alpha, work_alpha, final_alpha, final_alpha);
+	return float4(final_alpha, final_alpha, final_alpha, final_alpha);
 }
 
 technique Draw

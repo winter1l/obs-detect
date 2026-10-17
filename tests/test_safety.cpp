@@ -355,7 +355,7 @@ static void testUnlimitedMaskGeometry()
 {
 	for (size_t count : {size_t{0}, size_t{64}, size_t{65}, size_t{256}}) {
 		std::vector<MaskRect> rects(count, {10.0f, 20.0f, 30.0f, 40.0f});
-		auto vertices = buildMaskVertices(rects, 5.0f, 300.0f);
+		auto vertices = buildMaskVertices(rects, 5.0f);
 		require(vertices.size() == count * 6,
 			"mask geometry must not truncate rectangle count");
 	}
@@ -369,7 +369,7 @@ static void testUnlimitedMaskGeometry()
 
 static void testShaderMaskContract()
 {
-	for (const char *name : {"masking.effect", "pixelate.effect", "kawase_blur.effect"}) {
+	for (const char *name : {"masking.effect", "pixelate.effect"}) {
 		std::ifstream input(std::string(OBS_DETECT_SOURCE_DIR) + "/data/effects/" + name);
 		require(input.is_open(), "mask shader should be readable");
 		std::ostringstream contents;

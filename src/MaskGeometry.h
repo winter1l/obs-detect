@@ -19,8 +19,7 @@ struct MaskVertex {
 	float rectHeight;
 };
 
-std::vector<MaskVertex> buildMaskVertices(const std::vector<MaskRect> &rects, float featherPixels,
-					  float blurWorkPaddingPixels);
+std::vector<MaskVertex> buildMaskVertices(const std::vector<MaskRect> &rects, float featherPixels);
 
 inline bool shouldForceFullscreenMask(bool collectionSucceeded, bool maskTextureAvailable)
 {

@@ -2693,7 +2693,6 @@ static gs_texture_t *build_gpu_mask_texture(struct detect_filter *tf,
 					    const std::vector<MaskRect> &rects, uint32_t width,
 					    uint32_t height)
 {
-	constexpr float blurWorkPadding = 300.0f;
 	tf->maskForceFullscreen = false;
 	if (!tf->maskTexrender || !tf->maskShapeEffect) {
 		tf->maskForceFullscreen = true;
@@ -2703,7 +2702,7 @@ static gs_texture_t *build_gpu_mask_texture(struct detect_filter *tf,
 
 	std::vector<MaskVertex> vertices;
 	try {
-		vertices = buildMaskVertices(rects, (float)tf->maskingFeather, blurWorkPadding);
+		vertices = buildMaskVertices(rects, (float)tf->maskingFeather);
 	} catch (const std::bad_alloc &) {
 		tf->maskForceFullscreen = true;
 		log_mask_failure(tf, "vertex allocation");
@@ -2743,12 +2742,8 @@ static gs_texture_t *build_gpu_mask_texture(struct detect_filter *tf,
 	if (vertexBuffer) {
 		gs_eparam_t *feather =
 			gs_effect_get_param_by_name(tf->maskShapeEffect, "feather_pixels");
-		gs_eparam_t *workPadding = gs_effect_get_param_by_name(tf->maskShapeEffect,
-								       "blur_work_padding_pixels");
 		if (feather)
 			gs_effect_set_float(feather, (float)tf->maskingFeather);
-		if (workPadding)
-			gs_effect_set_float(workPadding, blurWorkPadding);
 
 		gs_blend_state_push();
 		// Overlapping mask quads must add up. libobs disables blending when it renders
@@ -2790,7 +2785,6 @@ static void draw_masked_output(struct detect_filter *tf, gs_texture_t *sourceTex
 			gs_effect_set_bool(forceParam, tf->maskForceFullscreen);
 	};
 	applyMaskTexture(tf->maskingEffect);
-	applyMaskTexture(tf->kawaseBlurEffect);
 	applyMaskTexture(tf->pixelateEffect);
 
 	// Preserve the original frame for blending
@@ -2809,7 +2803,7 @@ static void draw_masked_output(struct detect_filter *tf, gs_texture_t *sourceTex
 	if (tf->maskingType == "output_mask") {
 		technique_name = "DrawMask";
 	} else if (tf->maskingType == "blur") {
-		tex = blur_image(tf, width, height, maskTexture, sourceTex);
+		tex = blur_image(tf, width, height, sourceTex);
 		destroy_tex = true; // blur_image creates a new texture
 	} else if (tf->maskingType == "pixelate") {
 		tex = pixelate_image(tf, width, height, maskTexture, (float)tf->maskingBlurRadius,
