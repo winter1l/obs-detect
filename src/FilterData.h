@@ -4,6 +4,7 @@
 #include <obs-module.h>
 #include <util/circlebuf.h>
 #include "ort-model/ONNXRuntimeModel.h"
+#include "FaceInferenceQueue.h"
 #include "FaceStateStore.h"
 #include "sort/Sort.h"
 #include "sort/StateHistory.h"
@@ -174,15 +175,13 @@ struct filter_data {
 	cv::Rect inferenceCropRect;
 	bool inferenceFrameReady;
 	uint64_t lastQueuedInferenceFrameId = 0;
-	uint64_t frameCount;
 
 	// Face Inference background thread
 	std::thread faceInferenceThread;
 	std::atomic<bool> stopFaceInferenceThread;
 	std::mutex faceInferenceMutex;
-	std::condition_variable faceInferenceCV;
-	std::vector<Object> faceInferenceQueue;
-	cv::Mat faceInferenceFrame;
+	FaceInferenceQueue faceInferenceJobs{4};
+	std::chrono::steady_clock::time_point lastFaceQueueFullLog;
 
 	// File IO background thread
 	std::thread ioThread;
@@ -195,6 +194,41 @@ struct filter_data {
 
 	std::unique_ptr<ONNXRuntimeModel> onnxruntimemodel;
 	std::vector<std::string> classNames;
+
+	// Model state readable from the graphics and audio threads without modelMutex.
+	bool effectsLoaded = false;
+	std::atomic<bool> modelLoaded{false};
+	std::atomic<bool> useDirectML{false};
+	std::atomic<bool> modelSupportsZeroCopy{false};
+	std::atomic<bool> zeroCopyPipelineReady{false};
+
+	// Tracker resets are requested from other threads and applied by the inference thread.
+	std::atomic<uint64_t> trackerResetGeneration{0};
+	uint64_t appliedTrackerResetGeneration = 0;
+	int coverageUpdates = 0;
+	// Frames before coverageStartFrameId or after lastCoveredFrameId have no reliable
+	// detections, so masking falls back to a full-frame mask for them.
+	std::atomic<uint64_t> coverageStartFrameId{0};
+	std::atomic<uint64_t> lastCoveredFrameId{0};
+
+	// Tracking (zoom-follow) crop filter is attached once the filter has a parent.
+	bool trackingRequested = false;
+	// The crop filter is looked up by name, so it may only be attached after a scene
+	// collection load has added the saved filters (load callback), or after a grace
+	// period for filters that are never loaded (added from the UI, duplicated).
+	std::atomic<bool> loadCompleted{false};
+	uint64_t ticksSinceCreate = 0;
+
+	// Track switch detection (log only). Inference thread only, except the setting.
+	struct ExemptTrackSample {
+		cv::Rect2f rect;
+		uint64_t unseenFrames = 0;
+	};
+	std::atomic<int> trackSwitchDetection{0};
+	std::unordered_map<uint64_t, ExemptTrackSample> exemptTrackLastRects;
+	std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> trackSwitchSuspects;
+	std::chrono::steady_clock::time_point lastTrackSwitchLog;
+	int suppressedTrackSwitchLogs = 0;
 
 #if _WIN32
 	std::wstring modelFilepath;

@@ -88,6 +88,8 @@ target_sources(
           src/detect-filter.cpp
           src/detect-filter-info.c
           src/detect-filter-utils.cpp
+          src/FaceInferenceQueue.cpp
+          src/FaceReferenceSelection.cpp
           src/FaceStateStore.cpp
           src/FrameUtils.cpp
           src/MaskGeometry.cpp

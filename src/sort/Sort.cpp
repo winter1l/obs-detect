@@ -197,6 +197,12 @@ std::vector<Object> Sort::update(uint64_t frameId, const std::vector<Object> &de
 			trackedObjects.back().identityEpoch = 1;
 			trackedObjects.back().unseenFrames = 0;
 			trackedObjects.back().hitFrames = 1;
+			// Same instant confirmation as new tracks created alongside existing ones.
+			if (this->instantTrackAreaRatio > 0.0f && this->screenArea > 0.0f &&
+			    detection.rect.area() >=
+				    this->screenArea * (this->instantTrackAreaRatio / 100.0f)) {
+				trackedObjects.back().hitFrames = std::max(1, this->minHitFrames);
+			}
 			trackedObjects.back().trackingState = "New (1)";
 			trackedObjects.back().lastVisibleRects.push_back(detection.rect);
 		}

@@ -23,9 +23,9 @@ VertDataOut VSDefault(VertDataIn v_in)
 	return vert_out;
 }
 
-float SignedBoxDistance(float2 point, float2 half_size)
+float SignedBoxDistance(float2 offset_px, float2 half_size)
 {
-	float2 d = abs(point) - half_size;
+	float2 d = abs(offset_px) - half_size;
 	return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
 }
 
@@ -33,17 +33,17 @@ float4 PSShape(VertDataOut v_in) : TARGET
 {
 	float geometry_padding = feather_pixels + blur_work_padding_pixels;
 	float2 quad_size = v_in.rect_size + geometry_padding * 2.0;
-	float2 point = (v_in.uv - 0.5) * quad_size;
+	float2 offset_px = (v_in.uv - 0.5) * quad_size;
 	float2 half_size = v_in.rect_size * 0.5;
 
 	float corner_radius = feather_pixels;
 	float2 rounded_half_size = max(half_size - corner_radius, 0.0);
-	float rounded_distance = SignedBoxDistance(point, rounded_half_size) - corner_radius;
+	float rounded_distance = SignedBoxDistance(offset_px, rounded_half_size) - corner_radius;
 	float final_alpha = feather_pixels > 0.0
-		? smoothstep(feather_pixels, 0.0, rounded_distance)
+		? 1.0 - smoothstep(0.0, feather_pixels, rounded_distance)
 		: (rounded_distance <= 0.0 ? 1.0 : 0.0);
 
-	float box_distance = SignedBoxDistance(point, half_size);
+	float box_distance = SignedBoxDistance(offset_px, half_size);
 	float work_alpha = box_distance <= geometry_padding ? 1.0 : 0.0;
 	return float4(final_alpha, work_alpha, final_alpha, final_alpha);
 }

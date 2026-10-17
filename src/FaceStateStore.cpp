@@ -1,7 +1,23 @@
 #include "FaceStateStore.h"
 
 #include <atomic>
+#include <algorithm>
 #include <unordered_set>
+
+namespace {
+constexpr size_t maxRememberedSelfEpochs = 4;
+
+void rememberSelfEpoch(FaceTrackDecision &decision, uint64_t epoch)
+{
+	if (epoch == 0 ||
+	    std::find(decision.confirmedSelfEpochs.begin(), decision.confirmedSelfEpochs.end(),
+		      epoch) != decision.confirmedSelfEpochs.end())
+		return;
+	decision.confirmedSelfEpochs.push_back(epoch);
+	if (decision.confirmedSelfEpochs.size() > maxRememberedSelfEpochs)
+		decision.confirmedSelfEpochs.erase(decision.confirmedSelfEpochs.begin());
+}
+} // namespace
 
 FaceStateStore::FaceStateStore()
 {
@@ -60,20 +76,28 @@ void FaceStateStore::synchronizeTracks(const std::vector<FaceTrackIdentity> &tra
 		if (it == decisions_.end()) {
 			FaceTrackDecision decision;
 			decision.identityEpoch = track.identityEpoch;
+			decision.area = track.area;
 			decisions_.emplace(track.id, decision);
 			continue;
 		}
 
 		FaceTrackDecision &decision = it->second;
+		decision.area = track.area;
 		if (decision.identityEpoch == track.identityEpoch)
 			continue;
 
-		if (preserveOnRecovery_ && decision.status == FaceStatus::IS_ME) {
-			decision.identityEpoch = track.identityEpoch;
+		const bool wasConfirmedSelf = decision.status == FaceStatus::IS_ME;
+		if (wasConfirmedSelf)
+			rememberSelfEpoch(decision, decision.identityEpoch);
+		auto confirmedEpochs = std::move(decision.confirmedSelfEpochs);
+		decision = FaceTrackDecision{};
+		decision.identityEpoch = track.identityEpoch;
+		decision.area = track.area;
+		decision.confirmedSelfEpochs = std::move(confirmedEpochs);
+		decision.priorityRecheck = wasConfirmedSelf;
+		if (preserveOnRecovery_ && wasConfirmedSelf) {
+			decision.status = FaceStatus::IS_ME;
 			decision.carriedAcrossRecovery = true;
-		} else {
-			decision = FaceTrackDecision{};
-			decision.identityEpoch = track.identityEpoch;
 		}
 	}
 
@@ -100,57 +124,186 @@ FaceTrackDecision FaceStateStore::getDecision(uint64_t id, uint64_t identityEpoc
 	return decision;
 }
 
-bool FaceStateStore::beginCheck(uint64_t id, uint64_t identityEpoch)
+bool FaceStateStore::beginCheck(uint64_t id, uint64_t identityEpoch, uint64_t nowMs,
+				bool *priority, uint64_t *checkToken)
 {
 	std::lock_guard<std::mutex> lock(mutex_);
 	auto it = decisions_.find(id);
 	if (it == decisions_.end() || it->second.identityEpoch != identityEpoch)
 		return false;
-	if (it->second.status == FaceStatus::IS_ME || it->second.status == FaceStatus::CHECKING)
+	FaceTrackDecision &decision = it->second;
+	if (decision.checkInFlight || isSettledSelf(decision) || nowMs < decision.nextCheckAtMs)
 		return false;
 
-	it->second.status = FaceStatus::CHECKING;
-	it->second.carriedAcrossRecovery = false;
+	decision.checkInFlight = true;
+	decision.activeCheckToken = nextCheckToken_++;
+	if (nextCheckToken_ == 0)
+		nextCheckToken_ = 1;
+	if (priority)
+		*priority = decision.priorityRecheck || decision.revalidate;
+	if (checkToken)
+		*checkToken = decision.activeCheckToken;
 	publishLocked();
 	return true;
 }
 
-bool FaceStateStore::commit(uint64_t id, uint64_t identityEpoch, FaceStatus status,
-			    std::optional<float> similarity, int maxExemptPersons)
+bool FaceStateStore::completeCheck(uint64_t id, uint64_t identityEpoch,
+				   uint64_t checkToken,
+				   FaceCheckOutcome outcome,
+				   std::optional<float> similarity, int maxExemptPersons,
+				   uint64_t nowMs, const FaceRetryPolicy &retryPolicy)
 {
 	std::lock_guard<std::mutex> lock(mutex_);
 	auto it = decisions_.find(id);
 	if (it == decisions_.end() || it->second.identityEpoch != identityEpoch)
 		return false;
+	if (!it->second.checkInFlight || it->second.activeCheckToken != checkToken)
+		return false;
 
-	if (status == FaceStatus::IS_ME && it->second.status != FaceStatus::IS_ME &&
-	    maxExemptPersons > 0) {
-		int currentExemptCount = 0;
-		for (const auto &[otherId, decision] : decisions_) {
-			(void)otherId;
-			if (decision.status == FaceStatus::IS_ME)
-				currentExemptCount++;
-		}
-		if (currentExemptCount >= maxExemptPersons)
-			status = FaceStatus::NOT_ME;
-	}
-
-	it->second.status = status;
-	it->second.carriedAcrossRecovery = false;
+	FaceTrackDecision &decision = it->second;
+	decision.checkInFlight = false;
+	decision.activeCheckToken = 0;
+	decision.lastOutcome = outcome;
 	if (similarity.has_value()) {
-		it->second.similarity = *similarity;
-		it->second.hasSimilarity = true;
-	} else if (status == FaceStatus::UNKNOWN) {
-		it->second.similarity = 0.0f;
-		it->second.hasSimilarity = false;
+		decision.similarity = *similarity;
+		decision.hasSimilarity = true;
 	}
+
+	// An exemption is kept through inconclusive checks only when it was carried across
+	// a recovery or is being revalidated after a conflict.
+	const bool keepExemptWhenInconclusive =
+		decision.status == FaceStatus::IS_ME &&
+		(decision.carriedAcrossRecovery || decision.revalidate);
+	decision.revalidate = false;
+
+	bool exemptConflict = false;
+	if (outcome == FaceCheckOutcome::MATCH && decision.status != FaceStatus::IS_ME &&
+	    maxExemptPersons > 0) {
+		if (!resolveExemptConflictLocked(id, decision, decision.similarity,
+						 maxExemptPersons)) {
+			outcome = FaceCheckOutcome::EXEMPT_LIMIT;
+			decision.lastOutcome = outcome;
+			exemptConflict = true;
+		}
+	}
+
+	switch (outcome) {
+	case FaceCheckOutcome::MATCH:
+		decision.status = FaceStatus::IS_ME;
+		decision.carriedAcrossRecovery = false;
+		decision.priorityRecheck = false;
+		decision.nextCheckAtMs = 0;
+		rememberSelfEpoch(decision, identityEpoch);
+		break;
+	case FaceCheckOutcome::MISMATCH:
+	case FaceCheckOutcome::EXEMPT_LIMIT:
+		decision.status = FaceStatus::NOT_ME;
+		decision.carriedAcrossRecovery = false;
+		decision.priorityRecheck = false;
+		// A conflicting match retries soon so it can take the slot if the current
+		// holder fails its revalidation.
+		decision.nextCheckAtMs = nowMs + (exemptConflict ? retryPolicy.noFaceRetryMs
+								 : retryPolicy.mismatchRetryMs);
+		break;
+	case FaceCheckOutcome::NO_FACE:
+		if (!keepExemptWhenInconclusive) {
+			decision.status = FaceStatus::UNKNOWN;
+			decision.hasSimilarity = false;
+		}
+		decision.nextCheckAtMs = nowMs + retryPolicy.noFaceRetryMs;
+		break;
+	case FaceCheckOutcome::INFERENCE_ERROR:
+		if (!keepExemptWhenInconclusive)
+			decision.status = FaceStatus::UNKNOWN;
+		decision.nextCheckAtMs = nowMs + retryPolicy.errorRetryMs;
+		break;
+	case FaceCheckOutcome::NONE:
+		decision.status = FaceStatus::UNKNOWN;
+		decision.nextCheckAtMs = nowMs + retryPolicy.errorRetryMs;
+		break;
+	}
+	publishLocked();
+	return true;
+}
+
+// Called when `candidate` matched while the exempt limit may be full. Returns true if the
+// candidate may become IS_ME. A clearly better match, or a much larger face (in a selfie
+// stream the streamer is the closest face), takes the slot from the weakest holder, which
+// is reset for an immediate recheck. Otherwise the holders are flagged for revalidation so
+// a holder that was assigned to the wrong person can lose the slot.
+bool FaceStateStore::resolveExemptConflictLocked(uint64_t id, FaceTrackDecision &candidate,
+						 float similarity, int maxExemptPersons)
+{
+	constexpr float similarityMargin = 0.05f;
+	constexpr float largerFaceRatio = 1.5f;
+
+	auto holderSimilarity = [](const FaceTrackDecision &holder) {
+		return holder.hasSimilarity && !holder.carriedAcrossRecovery ? holder.similarity
+									      : 0.0f;
+	};
+
+	int exemptCount = 0;
+	FaceTrackDecision *weakest = nullptr;
+	for (auto &[otherId, other] : decisions_) {
+		if (otherId == id || other.status != FaceStatus::IS_ME)
+			continue;
+		exemptCount++;
+		if (!weakest || holderSimilarity(other) < holderSimilarity(*weakest) ||
+		    (holderSimilarity(other) == holderSimilarity(*weakest) &&
+		     other.area < weakest->area))
+			weakest = &other;
+	}
+	if (exemptCount < maxExemptPersons || !weakest)
+		return true;
+
+	const bool clearlyBetterMatch = similarity >= holderSimilarity(*weakest) + similarityMargin;
+	const bool clearlyLarger =
+		weakest->area > 0.0f && candidate.area >= weakest->area * largerFaceRatio;
+	if (clearlyBetterMatch || clearlyLarger) {
+		weakest->status = FaceStatus::UNKNOWN;
+		weakest->carriedAcrossRecovery = false;
+		weakest->revalidate = false;
+		weakest->priorityRecheck = true;
+		weakest->nextCheckAtMs = 0;
+		return true;
+	}
+
+	for (auto &[otherId, other] : decisions_) {
+		if (otherId != id && other.status == FaceStatus::IS_ME)
+			other.revalidate = true;
+	}
+	return false;
+}
+
+bool FaceStateStore::cancelCheck(uint64_t id, uint64_t identityEpoch,
+				 uint64_t checkToken, uint64_t nowMs, uint64_t retryDelayMs)
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	auto it = decisions_.find(id);
+	if (it == decisions_.end() || it->second.identityEpoch != identityEpoch ||
+	    !it->second.checkInFlight || it->second.activeCheckToken != checkToken)
+		return false;
+	it->second.checkInFlight = false;
+	it->second.activeCheckToken = 0;
+	it->second.nextCheckAtMs = nowMs + retryDelayMs;
 	publishLocked();
 	return true;
 }
 
 void FaceStateStore::resetToUnknown(uint64_t id, uint64_t identityEpoch)
 {
-	commit(id, identityEpoch, FaceStatus::UNKNOWN, std::nullopt, 0);
+	std::lock_guard<std::mutex> lock(mutex_);
+	auto it = decisions_.find(id);
+	if (it == decisions_.end() || it->second.identityEpoch != identityEpoch)
+		return;
+	it->second.status = FaceStatus::UNKNOWN;
+	it->second.checkInFlight = false;
+	it->second.activeCheckToken = 0;
+	it->second.carriedAcrossRecovery = false;
+	it->second.hasSimilarity = false;
+	it->second.nextCheckAtMs = 0;
+	it->second.lastOutcome = FaceCheckOutcome::INFERENCE_ERROR;
+	publishLocked();
 }
 
 std::shared_ptr<const FaceDecisionSnapshot> FaceStateStore::snapshot() const
@@ -162,8 +315,15 @@ bool FaceStateStore::isExempt(const FaceDecisionSnapshot &snapshot, uint64_t id,
 			      uint64_t identityEpoch, bool allowCarriedEpochMismatch)
 {
 	auto it = snapshot.find(id);
-	if (it == snapshot.end() || it->second.status != FaceStatus::IS_ME)
+	if (it == snapshot.end())
 		return false;
-	return it->second.identityEpoch == identityEpoch ||
-	       (allowCarriedEpochMismatch && it->second.carriedAcrossRecovery);
+	const FaceTrackDecision &decision = it->second;
+	if (decision.identityEpoch == identityEpoch)
+		return decision.status == FaceStatus::IS_ME;
+	if (std::find(decision.confirmedSelfEpochs.begin(),
+		      decision.confirmedSelfEpochs.end(), identityEpoch) !=
+	    decision.confirmedSelfEpochs.end())
+		return true;
+	return allowCarriedEpochMismatch && decision.status == FaceStatus::IS_ME &&
+	       decision.carriedAcrossRecovery;
 }
