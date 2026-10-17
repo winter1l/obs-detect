@@ -68,6 +68,11 @@ static uint64_t face_now_ms()
 		.count();
 }
 
+static StageProfiler *active_profiler(filter_data *tf)
+{
+	return tf->profilingEnabled ? &tf->profiler : nullptr;
+}
+
 // Tracks can outlive a model swap, so labels are not guaranteed to be valid indices.
 static const char *class_name_or_unknown(const std::vector<std::string> &names, int label)
 {
@@ -524,6 +529,7 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_add_bool(debug_group_props, "show_yunet_detections", obs_module_text("ShowYuNetDetections"));
 	obs_properties_add_bool(debug_group_props, "enable_face_stats", obs_module_text("ShowFaceSimilarityStats"));
 	obs_properties_add_bool(debug_group_props, "enable_similarity_log", obs_module_text("EnableSimilarityLog"));
+	obs_properties_add_bool(debug_group_props, "enable_stage_profiling", obs_module_text("EnableStageProfiling"));
 	
 	obs_properties_add_button(debug_group_props, "open_obs_logs", "OBS 로그 보기", [](obs_properties_t *, obs_property_t *, void *) {
 		QMainWindow *main_window = static_cast<QMainWindow *>(obs_frontend_get_main_window());
@@ -569,6 +575,7 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "enable_face_stats", false);
 	obs_data_set_default_bool(settings, "enable_face_stats_log", false);
 	obs_data_set_default_bool(settings, "enable_similarity_log", false);
+	obs_data_set_default_bool(settings, "enable_stage_profiling", false);
 	obs_data_set_default_bool(settings, "show_yunet_detections", false);
 	obs_data_set_default_string(settings, "face_stats_log_path", "");
 	
@@ -724,6 +731,12 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	tf->minHitFrames = (int)obs_data_get_int(settings, "min_hit_frames");
 	tf->enableFaceStats = obs_data_get_bool(settings, "enable_face_stats");
 	tf->enableSimilarityLog = obs_data_get_bool(settings, "enable_similarity_log");
+	{
+		const bool profiling = obs_data_get_bool(settings, "enable_stage_profiling");
+		if (profiling && !tf->profilingEnabled)
+			tf->profiler.clear();
+		tf->profilingEnabled = profiling;
+	}
 	tf->showYuNetDetections = obs_data_get_bool(settings, "show_yunet_detections");
 
 	if (tf->tracker.getMinHitFrames() != tf->minHitFrames) {
@@ -1360,6 +1373,8 @@ static void run_model_inference(struct detect_filter *tf, InferenceJob job)
 		~InferenceCompletionGuard() { flag = false; }
 	} completionGuard{tf->isInferencing};
 
+	StageProfiler *profiler = active_profiler(tf);
+	ScopedStage totalStage(profiler, StageProfiler::InferenceTotal);
 	static auto last_loop_time = std::chrono::high_resolution_clock::now();
 
 	// Apply tracker resets requested by other threads (deactivate, model swap).
@@ -1426,6 +1441,7 @@ static void run_model_inference(struct detect_filter *tf, InferenceJob job)
 			cropRect = cv::Rect(tf->crop_left, tf->crop_top, cropWidth, cropHeight);
 		}
 		try {
+			ScopedStage cvtStage(profiler, StageProfiler::InferenceCvtColor);
 			if (tf->crop_enabled)
 				cv::cvtColor(imageBGRA(cropRect), inferenceFrame,
 					     cv::COLOR_BGRA2BGR);
@@ -1438,6 +1454,12 @@ static void run_model_inference(struct detect_filter *tf, InferenceJob job)
 
 		try {
 			objects = tf->onnxruntimemodel->inference(inferenceFrame);
+			if (profiler) {
+				const auto &timings = tf->onnxruntimemodel->lastTimings();
+				profiler->add(StageProfiler::ModelPreprocess, timings.preprocessMs);
+				profiler->add(StageProfiler::ModelRun, timings.runMs);
+				profiler->add(StageProfiler::ModelPostprocess, timings.postprocessMs);
+			}
 		} catch (const Ort::Exception &e) {
 			obs_log(LOG_ERROR, "ONNXRuntime Exception: %s", e.what());
 			return;
@@ -1512,6 +1534,7 @@ static void run_model_inference(struct detect_filter *tf, InferenceJob job)
 		float screenArea = (float)(sourceWidth * sourceHeight);
 		tf->tracker.setScreenArea(screenArea);
 		tf->tracker.setScreenDimensions((float)sourceWidth, (float)sourceHeight);
+		ScopedStage trackerStage(profiler, StageProfiler::TrackerUpdate);
 		objects = tf->tracker.update(inferenceFrameId, objects);
 	} else {
 		// When SORT tracking is off, track objects by assigning temporary IDs and record states to history
@@ -1582,7 +1605,10 @@ static void run_model_inference(struct detect_filter *tf, InferenceJob job)
 
 			if (!requests.empty()) {
 				FaceInferenceJob faceJob;
-				faceJob.imageBGRA = imageBGRA.clone();
+				{
+					ScopedStage cloneStage(profiler, StageProfiler::FaceJobClone);
+					faceJob.imageBGRA = imageBGRA.clone();
+				}
 				faceJob.requests = requests;
 				faceJob.frameId = inferenceFrameId;
 				faceJob.priority = priorityJob;
@@ -1692,6 +1718,7 @@ static void run_model_inference(struct detect_filter *tf, InferenceJob job)
 	}
 
 	if (tf->preview || tf->debugMode || tf->enableFaceStats || tf->showYuNetDetections) {
+		ScopedStage overlayStage(profiler, StageProfiler::OverlayBuild);
 		cv::Mat frame;
 		cv::cvtColor(imageBGRA, frame, cv::COLOR_BGRA2BGR);
 
@@ -1842,6 +1869,8 @@ static void run_model_inference(struct detect_filter *tf, InferenceJob job)
 			}
 		}
 
+		overlayStage.stop();
+		ScopedStage storeStage(profiler, StageProfiler::PreviewHistoryStore);
 		std::lock_guard<std::mutex> lock(tf->outputLock);
 		tf->previewHistory[inferenceFrameId] = overlay.clone();
 		// Clean up old preview frames
@@ -2312,6 +2341,15 @@ void detect_filter_video_tick(void *data, float seconds)
 	tf->ticksSinceCreate++;
 	sync_tracking_filter(tf);
 
+	StageProfiler *profiler = active_profiler(tf);
+	if (profiler) {
+		std::string report;
+		if (tf->profiler.takeReport(std::chrono::steady_clock::now(), std::chrono::seconds(5),
+					    report))
+			obs_log(LOG_INFO, "%s", report.c_str());
+	}
+	ScopedStage tickStage(profiler, StageProfiler::TickTotal);
+
 	if (tf->isDisabled || !tf->modelLoaded || !obs_source_enabled(tf->source)) {
 		clear_all_buffers(tf, false);
 		return;
@@ -2334,7 +2372,10 @@ void detect_filter_video_tick(void *data, float seconds)
 		if (!lock.owns_lock() || tf->inputBGRA.empty()) {
 			return;
 		}
-		imageBGRA = tf->inputBGRA.clone();
+		{
+			ScopedStage cloneStage(profiler, StageProfiler::TickClone);
+			imageBGRA = tf->inputBGRA.clone();
+		}
 		ownedFrameId = tf->inputBGRAFrameId;
 		frameWidth = imageBGRA.cols;
 		frameHeight = imageBGRA.rows;
@@ -2802,6 +2843,8 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 	UNUSED_PARAMETER(_effect);
 
 	struct detect_filter *tf = reinterpret_cast<detect_filter *>(data);
+	StageProfiler *profiler = active_profiler(tf);
+	ScopedStage renderStage(profiler, StageProfiler::RenderTotal);
 
 	// FPS-based update for lookahead and preemptive masking frames (0.5s / 0.25s)
 	double fps = 60.0;
@@ -2845,6 +2888,7 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 		return;
 	}
 
+	ScopedStage captureStage(profiler, StageProfiler::RenderCapture);
 	gs_texrender_reset(tf->texrender);
 	if (!gs_texrender_begin(tf->texrender, width, height)) {
 		if (tf->source) {
@@ -2861,6 +2905,7 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 	obs_source_video_render(target);
 	gs_blend_state_pop();
 	gs_texrender_end(tf->texrender);
+	captureStage.stop();
 
 	if (!modelReady) {
 		// No detector yet (still loading or failed to load): mask the whole frame
@@ -2953,12 +2998,18 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 			if (!tf->stagesurface) {
 				tf->stagesurface = gs_stagesurface_create(width, height, GS_BGRA);
 			}
+			ScopedStage readbackStage(profiler, StageProfiler::StageReadback);
 			gs_stage_texture(tf->stagesurface, render_tex);
 			uint8_t *video_data;
 			uint32_t linesize;
-			if (gs_stagesurface_map(tf->stagesurface, &video_data, &linesize)) {
+			const bool mapped =
+				gs_stagesurface_map(tf->stagesurface, &video_data, &linesize);
+			readbackStage.stop();
+			if (mapped) {
+				ScopedStage copyStage(profiler, StageProfiler::CopyMapped);
 				cv::Mat ownedFrame =
 					copyMappedBGRA(video_data, linesize, width, height);
+				copyStage.stop();
 				gs_stagesurface_unmap(tf->stagesurface);
 				if (ownedFrame.empty()) {
 					if (tf->source)
@@ -3063,9 +3114,14 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 				}
 			}
 		}
+		double previewMs = 0.0;
 		if (!skip_preview) {
+			const auto previewStart = std::chrono::steady_clock::now();
 			outputBGRA = localOutputBGRA.clone();
-			
+			previewMs += std::chrono::duration<double, std::milli>(
+					     std::chrono::steady_clock::now() - previewStart)
+					     .count();
+
 			// Mask status display ([Confirmed] / [Reverse Masking] etc.) - Depends on preview option
 			if (tf->preview && tf->stateHistory) {
 				std::set<int> active_ids = tf->stateHistory->get_all_active_ids(maskRenderFrameId, tf->currentFrameId);
@@ -3170,13 +3226,16 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 			const uint64_t coverageStart = tf->coverageStartFrameId;
 			const bool covered = coverageStart != 0 && coverageStart <= maskRenderFrameId &&
 					     tf->lastCoveredFrameId >= maskRenderFrameId;
+			ScopedStage maskBuildStage(profiler, StageProfiler::MaskBuild);
 			gs_texture_t *maskTexture =
 				(maskCollectionFailed || !covered)
 					? nullptr
 					: build_gpu_mask_texture(tf, maskRects, width, height);
+			maskBuildStage.stop();
 			if (!covered ||
 			    shouldForceFullscreenMask(!maskCollectionFailed, maskTexture != nullptr))
 				tf->maskForceFullscreen = true;
+			ScopedStage maskDrawStage(profiler, StageProfiler::MaskDraw);
 			draw_masked_output(tf, delayed_tex, width, height, maskTexture);
 		} else {
 			gs_effect_t *default_effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
@@ -3188,6 +3247,7 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 		}
 		
 		if (!skip_preview && (tf->preview || tf->debugMode || tf->enableFaceStats)) {
+			const auto uploadStart = std::chrono::steady_clock::now();
 			if (!tf->previewTexture || gs_texture_get_width(tf->previewTexture) != width || gs_texture_get_height(tf->previewTexture) != height) {
 				if (tf->previewTexture) gs_texture_destroy(tf->previewTexture);
 				tf->previewTexture = gs_texture_create(width, height, GS_BGRA, 1,
@@ -3195,6 +3255,9 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 			} else {
 				gs_texture_set_image(tf->previewTexture, outputBGRA.data, width * 4, false);
 			}
+			previewMs += std::chrono::duration<double, std::milli>(
+					     std::chrono::steady_clock::now() - uploadStart)
+					     .count();
 			
 			gs_blend_state_push();
 			gs_enable_blending(true);
@@ -3207,7 +3270,9 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 			}
 			gs_blend_state_pop();
 		}
-		
+		if (profiler && previewMs > 0.0)
+			profiler->add(StageProfiler::PreviewUpload, previewMs);
+
 		tf->lastTexWidth = width;
 		tf->lastTexHeight = height;
 	} else if (totalDelay > 0) {

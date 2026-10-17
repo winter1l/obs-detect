@@ -6,6 +6,7 @@
 #include "ort-model/ONNXRuntimeModel.h"
 #include "FaceInferenceQueue.h"
 #include "FaceStateStore.h"
+#include "StageProfiler.h"
 #include "sort/Sort.h"
 #include "sort/StateHistory.h"
 #include "yunet/YuNet.h"
@@ -218,6 +219,10 @@ struct filter_data {
 	// period for filters that are never loaded (added from the UI, duplicated).
 	std::atomic<bool> loadCompleted{false};
 	uint64_t ticksSinceCreate = 0;
+
+	// Optional per-stage CPU timing (debug option), summarized in the OBS log.
+	std::atomic<bool> profilingEnabled{false};
+	StageProfiler profiler;
 
 	// Track switch detection (log only). Inference thread only, except the setting.
 	struct ExemptTrackSample {

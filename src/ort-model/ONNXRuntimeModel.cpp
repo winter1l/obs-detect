@@ -259,10 +259,14 @@ void ONNXRuntimeModel::nms_sorted_bboxes(const std::vector<Object> &objects,
 void ONNXRuntimeModel::inference(const cv::Mat &frame, const int input_index)
 {
 	// preprocess
+	auto stageStart = std::chrono::steady_clock::now();
 	cv::Mat pr_img = this->static_resize(frame, input_index);
 
 	float *blob_data = (float *)(this->input_buffer_[input_index].get());
 	blobFromImage(pr_img, blob_data);
+	lastTimings_ = {};
+	lastTimings_.preprocessMs = elapsedMs(stageStart);
+	stageStart = std::chrono::steady_clock::now();
 
 	// input names
 	std::vector<const char *> input_names;
@@ -281,6 +285,7 @@ void ONNXRuntimeModel::inference(const cv::Mat &frame, const int input_index)
 	this->session_.Run(run_options, input_names.data(), this->input_tensor_.data(),
 			   this->input_tensor_.size(), output_names.data(),
 			   this->output_tensor_.data(), this->output_tensor_.size());
+	lastTimings_.runMs = elapsedMs(stageStart);
 }
 
 #ifdef _WIN32

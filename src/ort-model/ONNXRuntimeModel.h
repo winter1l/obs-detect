@@ -10,6 +10,7 @@
 #include <string>
 #include <tuple>
 #include <atomic>
+#include <chrono>
 #include <stdexcept>
 
 #include "types.hpp"
@@ -65,6 +66,14 @@ public:
 #endif
 	}
 
+	// CPU time of the stages of the most recent inference() call.
+	struct InferenceTimings {
+		double preprocessMs = 0.0;
+		double runMs = 0.0;
+		double postprocessMs = 0.0;
+	};
+	const InferenceTimings &lastTimings() const { return lastTimings_; }
+
 	void setBBoxConfThresh(float thresh) { this->bbox_conf_thresh_ = thresh; }
 	void setNmsThresh(float thresh) { this->nms_thresh_ = thresh; }
 
@@ -98,6 +107,14 @@ protected:
 	// run inference on the model with the given frame that should go in the input index
 	void inference(const cv::Mat &frame, const int input_index);
 
+	static double elapsedMs(std::chrono::steady_clock::time_point start)
+	{
+		return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+								 start)
+			.count();
+	}
+
+	InferenceTimings lastTimings_;
 	std::vector<int> input_w_;
 	std::vector<int> input_h_;
 	float nms_thresh_;

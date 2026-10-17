@@ -93,6 +93,7 @@ target_sources(
           src/FaceStateStore.cpp
           src/FrameUtils.cpp
           src/MaskGeometry.cpp
+          src/StageProfiler.cpp
           src/obs-utils/obs-utils.cpp
           src/ort-model/ONNXRuntimeModel.cpp
           src/ort-model/YOLOv8FaceONNX.cpp

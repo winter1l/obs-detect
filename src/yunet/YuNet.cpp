@@ -32,7 +32,9 @@ std::vector<Object> YuNetONNX::inference(const cv::Mat &frame)
 	ONNXRuntimeModel::inference(frame, 0);
 
 	// Postprocessing
+	const auto postStart = std::chrono::steady_clock::now();
 	std::vector<Object> objects = postProcess(this->output_tensor_);
+	lastTimings_.postprocessMs = elapsedMs(postStart);
 
 	const float scale = std::fminf((float)input_w_[0] / (float)frame.cols,
 				       (float)input_h_[0] / (float)frame.rows);
