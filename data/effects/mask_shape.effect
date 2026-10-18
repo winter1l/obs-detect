@@ -35,12 +35,14 @@ float4 PSShape(VertDataOut v_in) : TARGET
 	float2 offset_px = (v_in.uv - 0.5) * quad_size;
 	float2 half_size = v_in.rect_size * 0.5;
 
-	float corner_radius = feather_pixels;
-	float2 rounded_half_size = max(half_size - corner_radius, 0.0);
-	float rounded_distance = SignedBoxDistance(offset_px, rounded_half_size) - corner_radius;
+	// The box itself is fully covered and the feather fades outwards over feather_pixels,
+	// reaching zero exactly at the quad edge. The distance outside a box is Euclidean, so
+	// the fade has rounded corners. (Rounding the box by feather_pixels instead turned
+	// boxes smaller than the feather into circles larger than the quad, cut off square.)
+	float box_distance = SignedBoxDistance(offset_px, half_size);
 	float final_alpha = feather_pixels > 0.0
-		? 1.0 - smoothstep(0.0, feather_pixels, rounded_distance)
-		: (rounded_distance <= 0.0 ? 1.0 : 0.0);
+		? 1.0 - smoothstep(0.0, feather_pixels, box_distance)
+		: (box_distance <= 0.0 ? 1.0 : 0.0);
 	return float4(final_alpha, final_alpha, final_alpha, final_alpha);
 }
 
