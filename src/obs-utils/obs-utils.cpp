@@ -3,6 +3,8 @@
 
 #include <obs-module.h>
 
+#include <algorithm>
+
 // Renders one full-screen pass of `technique` from `effect` into `texrender`.
 static bool render_pass(gs_texrender_t *texrender, gs_effect_t *effect, const char *technique,
 			gs_texture_t *input, uint32_t width, uint32_t height)
@@ -41,7 +43,7 @@ gs_texture_t *blur_image(struct filter_data *tf, uint32_t width, uint32_t height
 		return nullptr;
 	if (tf->kawaseBlurEffect == nullptr) {
 		obs_log(LOG_ERROR, "tf->kawaseBlurEffect is null");
-		return sourceTexture;
+		return nullptr;
 	}
 	gs_eparam_t *xOffset = gs_effect_get_param_by_name(tf->kawaseBlurEffect, "xOffset");
 	gs_eparam_t *yOffset = gs_effect_get_param_by_name(tf->kawaseBlurEffect, "yOffset");
@@ -49,17 +51,16 @@ gs_texture_t *blur_image(struct filter_data *tf, uint32_t width, uint32_t height
 	// Passes alternate between two render targets, so no texture is created or copied.
 	// Every pass covers the whole frame; the masking composite limits the result to the
 	// masked regions.
+	// At least one pass, so a stored strength of 0 cannot leave masked regions sharp.
+	const int passes = std::max(1, tf->maskingBlurRadius);
 	gs_texture_t *current = sourceTexture;
-	for (int i = 0; i < (int)tf->maskingBlurRadius; i++) {
+	for (int i = 0; i < passes; i++) {
 		gs_texrender_t *target = ensure_texrender(tf->blurTexrenders[i & 1]);
-		if (!target)
-			break;
 		gs_effect_set_float(xOffset, ((float)i + 0.5f) / (float)width);
 		gs_effect_set_float(yOffset, ((float)i + 0.5f) / (float)height);
-		if (!render_pass(target, tf->kawaseBlurEffect, "Draw", current, width, height)) {
-			obs_log(LOG_INFO, "Could not open background blur texrender!");
-			break;
-		}
+		if (!target ||
+		    !render_pass(target, tf->kawaseBlurEffect, "Draw", current, width, height))
+			return nullptr;
 		current = gs_texrender_get_texture(target);
 	}
 	return current;
@@ -73,14 +74,15 @@ gs_texture_t *pixelate_image(struct filter_data *tf, uint32_t width, uint32_t he
 		return nullptr;
 	if (tf->pixelateEffect == nullptr) {
 		obs_log(LOG_ERROR, "tf->pixelateEffect is null");
-		return sourceTexture;
+		return nullptr;
 	}
 	gs_eparam_t *pixel_size = gs_effect_get_param_by_name(tf->pixelateEffect, "pixel_size");
 	gs_eparam_t *tex_size = gs_effect_get_param_by_name(tf->pixelateEffect, "tex_size");
 	gs_eparam_t *maskTexture = gs_effect_get_param_by_name(tf->pixelateEffect, "mask_texture");
 	gs_eparam_t *forceFullMask =
 		gs_effect_get_param_by_name(tf->pixelateEffect, "force_full_mask");
-	if (maskTexture && alphaTexture)
+	// Always rebind, even to null, so a texture from an earlier frame is never sampled.
+	if (maskTexture)
 		gs_effect_set_texture(maskTexture, alphaTexture);
 	if (forceFullMask)
 		gs_effect_set_bool(forceFullMask, tf->maskForceFullscreen);
@@ -91,9 +93,7 @@ gs_texture_t *pixelate_image(struct filter_data *tf, uint32_t width, uint32_t he
 
 	gs_texrender_t *target = ensure_texrender(tf->pixelateTexrender);
 	if (!target ||
-	    !render_pass(target, tf->pixelateEffect, "Draw", sourceTexture, width, height)) {
-		obs_log(LOG_INFO, "Could not open background blur texrender!");
-		return sourceTexture;
-	}
+	    !render_pass(target, tf->pixelateEffect, "Draw", sourceTexture, width, height))
+		return nullptr;
 	return gs_texrender_get_texture(target);
 }

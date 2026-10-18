@@ -9,7 +9,7 @@ std::vector<MaskVertex> buildMaskVertices(const std::vector<MaskRect> &rects, fl
 	const float padding = std::max(0.0f, featherPixels);
 
 	for (const MaskRect &rect : rects) {
-		if (rect.width <= 0.0f || rect.height <= 0.0f)
+		if (!isDrawableMaskRect(rect))
 			continue;
 
 		const float left = rect.x - padding;

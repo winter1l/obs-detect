@@ -48,6 +48,7 @@
 #include "FaceReferenceSelection.h"
 #include "InferenceSafety.h"
 #include "MaskGeometry.h"
+#include "SettingsUnits.h"
 #include "edgeyolo/edgeyolo_onnxruntime.hpp"
 #include "ort-model/YOLOv8FaceONNX.hpp"
 #include "yunet/YuNet.h"
@@ -106,12 +107,40 @@ const char *detect_filter_getname(void *unused)
 
 /**                   PROPERTIES                     */
 
-static bool visible_on_bool(obs_properties_t *ppts, obs_data_t *settings, const char *bool_prop,
-			    const char *prop_name)
+// Shows each option only while its feature is on, and fine-tuning options only while
+// advanced settings are shown. Hidden options keep their values. This is the modified
+// callback of every toggle that affects visibility.
+static bool update_property_visibility(obs_properties_t *props, obs_property_t *,
+				       obs_data_t *settings)
 {
-	const bool enabled = obs_data_get_bool(settings, bool_prop);
-	obs_property_t *p = obs_properties_get(ppts, prop_name);
-	obs_property_set_visible(p, enabled);
+	auto show = [props](const char *name, bool visible) {
+		if (obs_property_t *prop = obs_properties_get(props, name))
+			obs_property_set_visible(prop, visible);
+	};
+	const bool advanced = obs_data_get_bool(settings, "show_advanced");
+
+	const std::string maskingType = obs_data_get_string(settings, "masking_type");
+	const bool masking = obs_data_get_bool(settings, "masking_group");
+	const bool dynamicExpansion = obs_data_get_bool(settings, "masking_dynamic_expansion");
+	show("masking_color", masking && maskingType == "solid_color");
+	show("masking_blur_radius", masking && (maskingType == "blur" || maskingType == "pixelate"));
+	show("masking_feather", masking);
+	show("masking_dynamic_expansion", masking && advanced);
+	show("masking_dilate_iterations", masking && advanced && !dynamicExpansion);
+	show("masking_dynamic_expansion_base", masking && advanced && dynamicExpansion);
+	show("masking_dynamic_expansion_ratio", masking && advanced && dynamicExpansion);
+
+	const bool faceExclusion = obs_data_get_bool(settings, "enable_face_exclusion");
+	show("reference_face_path", faceExclusion);
+	show("face_match_threshold", faceExclusion);
+	for (const char *name : {"person_category", "min_face_area_ratio", "face_recheck_seconds",
+				 "max_exempt_persons", "preserve_face_exclusion_on_recovery",
+				 "track_switch_detection"})
+		show(name, faceExclusion && advanced);
+
+	for (const char *name : {"min_size_threshold", "sort_tracking", "numThreads",
+				 "video_delay_frames"})
+		show(name, advanced);
 	return true;
 }
 
@@ -217,6 +246,12 @@ obs_properties_t *detect_filter_properties(void *data)
 
 	obs_properties_t *props = obs_properties_create();
 
+	obs_property_t *show_advanced = obs_properties_add_bool(
+		props, "show_advanced", obs_module_text("ShowAdvancedSettings"));
+	obs_property_set_long_description(show_advanced,
+					  obs_module_text("ShowAdvancedSettings.Description"));
+	obs_property_set_modified_callback(show_advanced, update_property_visibility);
+
 	// add drop down option for model size: Small, Medium, Large
 	obs_property_t *model_size =
 		obs_properties_add_list(props, "model_size", obs_module_text("ModelSize"),
@@ -307,39 +342,8 @@ obs_properties_t *detect_filter_properties(void *data)
 		obs_properties_add_group(props, "masking_group", obs_module_text("MaskingGroup"),
 					 OBS_GROUP_CHECKABLE, masking_group);
 
-	auto update_masking_visibility = [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
-		std::string masking_type_value = obs_data_get_string(settings, "masking_type");
-		obs_property_t *masking_color = obs_properties_get(props_, "masking_color");
-		obs_property_t *masking_blur_radius = obs_properties_get(props_, "masking_blur_radius");
-		obs_property_t *masking_feather = obs_properties_get(props_, "masking_feather");
-		obs_property_t *masking_dilation = obs_properties_get(props_, "masking_dilate_iterations");
-		obs_property_t *masking_dynamic_expansion = obs_properties_get(props_, "masking_dynamic_expansion");
-		obs_property_t *masking_dynamic_base = obs_properties_get(props_, "masking_dynamic_expansion_base");
-		obs_property_t *masking_dynamic_ratio = obs_properties_get(props_, "masking_dynamic_expansion_ratio");
-
-		const bool masking_enabled = obs_data_get_bool(settings, "masking_group");
-		const bool dynamic_enabled = obs_data_get_bool(settings, "masking_dynamic_expansion");
-
-		if (masking_color) obs_property_set_visible(masking_color, false);
-		if (masking_blur_radius) obs_property_set_visible(masking_blur_radius, false);
-		if (masking_feather) obs_property_set_visible(masking_feather, false);
-
-		if (masking_dynamic_expansion) obs_property_set_visible(masking_dynamic_expansion, masking_enabled);
-		if (masking_dilation) obs_property_set_visible(masking_dilation, masking_enabled && !dynamic_enabled);
-		if (masking_dynamic_base) obs_property_set_visible(masking_dynamic_base, masking_enabled && dynamic_enabled);
-		if (masking_dynamic_ratio) obs_property_set_visible(masking_dynamic_ratio, masking_enabled && dynamic_enabled);
-
-		if (masking_type_value == "solid_color") {
-			if (masking_color) obs_property_set_visible(masking_color, masking_enabled);
-		} else if (masking_type_value == "blur" || masking_type_value == "pixelate") {
-			if (masking_blur_radius) obs_property_set_visible(masking_blur_radius, masking_enabled);
-		}
-		if (masking_feather) obs_property_set_visible(masking_feather, masking_enabled);
-		return true;
-	};
-
 	// add callback to show/hide masking options
-	obs_property_set_modified_callback(masking_group_prop, update_masking_visibility);
+	obs_property_set_modified_callback(masking_group_prop, update_property_visibility);
 
 	// add masking options drop down selection: "Solid color", "Blur", "Transparent"
 	obs_property_t *masking_type = obs_properties_add_list(masking_group, "masking_type",
@@ -363,9 +367,7 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_add_int_slider(masking_group, "masking_feather",
 				      obs_module_text("MaskingFeather"), 0, 200, 1);
 
-
-
-	obs_property_set_modified_callback(masking_type, update_masking_visibility);
+	obs_property_set_modified_callback(masking_type, update_property_visibility);
 
 	// add slider for dilation iterations
 	obs_properties_add_int_slider(masking_group, "masking_dilate_iterations",
@@ -373,12 +375,18 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_property_t *masking_dynamic_expansion = obs_properties_add_bool(
 		masking_group, "masking_dynamic_expansion",
 		obs_module_text("MaskingDynamicExpansion"));
-	obs_property_set_modified_callback(masking_dynamic_expansion, update_masking_visibility);
+	obs_property_set_modified_callback(masking_dynamic_expansion, update_property_visibility);
 
-	obs_properties_add_float_slider(masking_group, "masking_dynamic_expansion_base",
-					obs_module_text("MaskingDynamicExpansionBase"), 0.0, 100.0, 1.0);
-	obs_properties_add_float_slider(masking_group, "masking_dynamic_expansion_ratio",
-					obs_module_text("MaskingDynamicExpansionRatio"), 0.0, 1.0, 0.01);
+	obs_property_t *dynamic_base = obs_properties_add_float_slider(
+		masking_group, "masking_dynamic_expansion_base",
+		obs_module_text("MaskingDynamicExpansionBase"), 0.0, 100.0, 1.0);
+	obs_property_set_long_description(dynamic_base,
+					  obs_module_text("MaskingDynamicExpansion.Description"));
+	obs_property_t *dynamic_ratio = obs_properties_add_float_slider(
+		masking_group, "masking_dynamic_expansion_ratio",
+		obs_module_text("MaskingDynamicExpansionRatio"), 0.0, 1.0, 0.01);
+	obs_property_set_long_description(dynamic_ratio,
+					  obs_module_text("MaskingDynamicExpansion.Description"));
 
 	// add options group for tracking and zoom-follow options
 	obs_properties_t *tracking_group_props = obs_properties_create();
@@ -474,11 +482,11 @@ obs_properties_t *detect_filter_properties(void *data)
 					  obs_module_text("ReferenceFaceImage.Description"));
 	obs_properties_add_float_slider(face_ex_group_props, "face_match_threshold", obs_module_text("FaceMatchThreshold"), 0.0, 1.0, 0.01);
 	obs_properties_add_float_slider(face_ex_group_props, "min_face_area_ratio", obs_module_text("MinFaceAreaRatio"), 0.0, 100.0, 0.1);
-	obs_property_t *face_inference_interval = obs_properties_add_int_slider(
-		face_ex_group_props, "face_inference_interval",
-		obs_module_text("FaceInferenceInterval"), 5, 60, 1);
-	obs_property_set_long_description(
-		face_inference_interval, obs_module_text("FaceInferenceInterval.Description"));
+	obs_property_t *face_recheck_seconds = obs_properties_add_float_slider(
+		face_ex_group_props, "face_recheck_seconds", obs_module_text("FaceRecheckSeconds"),
+		0.2, 2.0, 0.1);
+	obs_property_set_long_description(face_recheck_seconds,
+					  obs_module_text("FaceRecheckSeconds.Description"));
 	obs_properties_add_int_slider(face_ex_group_props, "max_exempt_persons", obs_module_text("MaxExemptPersons"), 0, 10, 1);
 	obs_property_t *preserve_face_exclusion =
 		obs_properties_add_bool(face_ex_group_props, "preserve_face_exclusion_on_recovery",
@@ -496,18 +504,7 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_property_set_long_description(track_switch_detection,
 					  obs_module_text("TrackSwitchDetection.Description"));
 
-	// Hide subproperties completely when unchecked
-	obs_property_set_modified_callback(enable_face_exclusion, [](obs_properties_t *props_, obs_property_t *, obs_data_t *settings) {
-		const bool enabled = obs_data_get_bool(settings, "enable_face_exclusion");
-		for (auto prop_name :
-		     {"reference_face_path", "face_match_threshold", "min_face_area_ratio",
-		      "face_inference_interval", "max_exempt_persons", "person_category",
-		      "preserve_face_exclusion_on_recovery", "track_switch_detection"}) {
-			obs_property_t *prop = obs_properties_get(props_, prop_name);
-			if (prop) obs_property_set_visible(prop, enabled);
-		}
-		return true;
-	});	
+	obs_property_set_modified_callback(enable_face_exclusion, update_property_visibility);
 
 	/* GPU, CPU and performance Props */
 	obs_property_t *p_use_gpu =
@@ -531,14 +528,14 @@ obs_properties_t *detect_filter_properties(void *data)
 	obs_properties_t *debug_group_props = obs_properties_create();
 	obs_properties_add_group(props, "debug_group", obs_module_text("DebugGroup"), OBS_GROUP_NORMAL, debug_group_props);
 	obs_properties_add_int_slider(debug_group_props, "video_delay_frames", obs_module_text("VideoDelayFrames"), 0, 10, 1);
-	obs_properties_add_bool(debug_group_props, "debug_mode", obs_module_text("DebugMode")); // FPS/Latency 로 바꿔
+	obs_properties_add_bool(debug_group_props, "debug_mode", obs_module_text("DebugMode"));
 	obs_properties_add_bool(debug_group_props, "preview", obs_module_text("Preview"));
 	obs_properties_add_bool(debug_group_props, "show_yunet_detections", obs_module_text("ShowYuNetDetections"));
 	obs_properties_add_bool(debug_group_props, "enable_face_stats", obs_module_text("ShowFaceSimilarityStats"));
 	obs_properties_add_bool(debug_group_props, "enable_similarity_log", obs_module_text("EnableSimilarityLog"));
 	obs_properties_add_bool(debug_group_props, "enable_stage_profiling", obs_module_text("EnableStageProfiling"));
 	
-	obs_properties_add_button(debug_group_props, "open_obs_logs", "OBS 로그 보기", [](obs_properties_t *, obs_property_t *, void *) {
+	obs_properties_add_button(debug_group_props, "open_obs_logs", obs_module_text("OpenObsLog"), [](obs_properties_t *, obs_property_t *, void *) {
 		QMainWindow *main_window = static_cast<QMainWindow *>(obs_frontend_get_main_window());
 		if (main_window) {
 			QMetaObject::invokeMethod(main_window, "on_actionViewCurrentLog_triggered", Qt::QueuedConnection);
@@ -598,6 +595,8 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_string(settings, "reference_face_path", "");
 	obs_data_set_default_int(settings, "person_category", -1);
 	obs_data_set_default_int(settings, "face_inference_interval", 15);
+	obs_data_set_default_double(settings, "face_recheck_seconds", faceRecheckSecondsFromFrames(15));
+	obs_data_set_default_bool(settings, "show_advanced", false);
 	obs_data_set_default_bool(settings, "masking_group", false);
 	obs_data_set_default_string(settings, "masking_type", "blur");
 	obs_data_set_default_string(settings, "masking_color", "#000000");
@@ -704,7 +703,16 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	tf->faceMatchThreshold = (float)obs_data_get_double(settings, "face_match_threshold");
 	tf->personCategory = (int)obs_data_get_int(settings, "person_category");
 	tf->minFaceAreaRatio = (float)obs_data_get_double(settings, "min_face_area_ratio");
-	tf->faceInferenceInterval = (int)obs_data_get_int(settings, "face_inference_interval");
+	// The delay is edited in seconds. Settings saved before that only have the frame
+	// value, and the frame value stays written so older versions read the same delay.
+	if (!obs_data_has_user_value(settings, "face_recheck_seconds") &&
+	    obs_data_has_user_value(settings, "face_inference_interval"))
+		obs_data_set_double(settings, "face_recheck_seconds",
+				    faceRecheckSecondsFromFrames((int)obs_data_get_int(
+					    settings, "face_inference_interval")));
+	tf->faceInferenceInterval =
+		faceRecheckFramesFromSeconds(obs_data_get_double(settings, "face_recheck_seconds"));
+	obs_data_set_int(settings, "face_inference_interval", tf->faceInferenceInterval);
 	tf->maskingEnabled = obs_data_get_bool(settings, "masking_group");
 	tf->maskingType = obs_data_get_string(settings, "masking_type");
 	tf->maskingColor = (int)obs_data_get_int(settings, "masking_color");
@@ -2659,8 +2667,16 @@ static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R,
 				extrapolated_rect.y = future_active_state.rect.y - (dy * time_diff);
 				extrapolated_rect.width = future_active_state.rect.width - (dw * time_diff);
 				extrapolated_rect.height = future_active_state.rect.height - (dh * time_diff);
-				
-				return scaleBoundingBox(extrapolated_rect, 1.2f);
+
+				// Extrapolating backwards can shrink the box to nothing (for example when
+				// it grows between the first two detections), which would leave the
+				// lead-in unmasked, so the box where the object will appear is always
+				// covered too.
+				cv::Rect2f covered = future_active_state.rect;
+				if (isDrawableMaskRect({extrapolated_rect.x, extrapolated_rect.y,
+							extrapolated_rect.width, extrapolated_rect.height}))
+					covered |= extrapolated_rect;
+				return scaleBoundingBox(covered, 1.2f);
 			} else {
 				// If no next future frame is found, use the current confirmed state
 				return scaleBoundingBox(future_active_state.rect, 1.2f);
@@ -2823,7 +2839,9 @@ static void draw_masked_output(struct detect_filter *tf, gs_texture_t *sourceTex
 			return;
 		gs_eparam_t *textureParam = gs_effect_get_param_by_name(effect, "mask_texture");
 		gs_eparam_t *forceParam = gs_effect_get_param_by_name(effect, "force_full_mask");
-		if (textureParam && maskTexture)
+		// Always rebind, even to null, so a texture from an earlier frame (possibly
+		// destroyed since) is never sampled.
+		if (textureParam)
 			gs_effect_set_texture(textureParam, maskTexture);
 		if (forceParam)
 			gs_effect_set_bool(forceParam, tf->maskForceFullscreen);
@@ -2849,8 +2867,14 @@ static void draw_masked_output(struct detect_filter *tf, gs_texture_t *sourceTex
 		gs_effect_set_color(maskColorParam, tf->maskingColor);
 	}
 
-	if (!tex)
+	if (!tex) {
+		// Blur or pixelation could not be rendered: cover the masked regions with opaque
+		// black rather than showing them unchanged.
+		log_mask_failure(tf, "masking effect");
+		technique_name = "DrawSolidColor";
+		gs_effect_set_color(maskColorParam, 0xFF000000);
 		tex = sourceTex;
+	}
 
 	gs_eparam_t *baseImageParam = gs_effect_get_param_by_name(tf->maskingEffect, "base_image");
 	if (baseImageParam)
@@ -2925,6 +2949,11 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 		}
 		return;
 	}
+	// After the source changes size, delayed frames, history boxes and the mask still use
+	// the old size, so people would be masked in the wrong place for up to the look-ahead.
+	// Dropping everything restarts masking fail-closed (full frame until detections).
+	if (tf->lastTexWidth != 0 && (tf->lastTexWidth != width || tf->lastTexHeight != height))
+		clear_all_buffers(tf, true);
 	// The tick uses the frame size for the zoom-follow crop.
 	tf->lastTexWidth = width;
 	tf->lastTexHeight = height;
@@ -3188,7 +3217,17 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 				maskRects.reserve(renderBoxes.size());
 				for (const RenderBox &box : renderBoxes) {
 					cv::Rect2f rect = box.rect;
-					if (rect.width <= 0 || rect.height <= 0 || box.mode == "Ghost")
+					if (box.mode == "Ghost")
+						continue;
+					if (!std::isfinite(rect.x) || !std::isfinite(rect.y) ||
+					    !std::isfinite(rect.width) || !std::isfinite(rect.height)) {
+						// Where this object is is unknown, so mask everything.
+						maskCollectionFailed = true;
+						tf->maskForceFullscreen = true;
+						log_mask_failure(tf, "invalid box");
+						continue;
+					}
+					if (rect.width <= 0 || rect.height <= 0)
 						continue;
 
 					if (tf->enableFaceExclusion && faceSnapshot &&

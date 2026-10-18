@@ -4,13 +4,17 @@
 #include "FrameUtils.h"
 #include "InferenceSafety.h"
 #include "MaskGeometry.h"
+#include "SettingsUnits.h"
 #include "sort/StateHistory.h"
 
 #include <atomic>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -360,6 +364,16 @@ static void testUnlimitedMaskGeometry()
 		require(vertices.size() == count * 6,
 			"mask geometry must not truncate rectangle count");
 	}
+	const float nan = std::numeric_limits<float>::quiet_NaN();
+	const float inf = std::numeric_limits<float>::infinity();
+	for (const MaskRect &bad : {MaskRect{0.0f, 0.0f, nan, 10.0f}, MaskRect{nan, 0.0f, 10.0f, 10.0f},
+				    MaskRect{0.0f, 0.0f, inf, 10.0f}, MaskRect{0.0f, 0.0f, 0.0f, 10.0f},
+				    MaskRect{0.0f, 0.0f, 10.0f, -1.0f}}) {
+		require(!isDrawableMaskRect(bad), "non-finite or empty rectangles are not drawable");
+		require(buildMaskVertices({bad}, 5.0f).empty(),
+			"non-finite or empty rectangles must not produce mask geometry");
+	}
+	require(isDrawableMaskRect({1.0f, 2.0f, 3.0f, 4.0f}), "a normal rectangle is drawable");
 	require(shouldForceFullscreenMask(false, true),
 		"rectangle collection failure must force full-screen masking");
 	require(shouldForceFullscreenMask(true, false),
@@ -445,6 +459,60 @@ static void testStateHistorySnapshotMatchesLiveQueries()
 		"an object absent from the closest frame has disappeared");
 }
 
+static void testFaceRecheckSecondsRoundTrip()
+{
+	for (int frames = 5; frames <= 60; ++frames)
+		require(faceRecheckFramesFromSeconds(faceRecheckSecondsFromFrames(frames)) == frames,
+			"stored face recheck frames must survive the seconds round trip");
+	require(faceRecheckFramesFromSeconds(0.5) == 15, "0.5 s is the 15-frame default");
+	require(faceRecheckFramesFromSeconds(0.0) == 5 && faceRecheckFramesFromSeconds(10.0) == 60,
+		"face recheck delay is clamped to the stored 5-60 frame range");
+}
+
+static std::set<std::string> readLocaleKeys(const std::string &name)
+{
+	std::ifstream input(std::string(OBS_DETECT_SOURCE_DIR) + "/data/locale/" + name);
+	require(input.is_open(), "locale file should be readable");
+	std::set<std::string> keys;
+	std::string line;
+	const std::regex entry(R"(^\s*([A-Za-z0-9_.]+)\s*=)");
+	while (std::getline(input, line)) {
+		std::smatch match;
+		if (std::regex_search(line, match, entry))
+			keys.insert(match[1]);
+	}
+	return keys;
+}
+
+static void testEveryUiTextKeyIsTranslated()
+{
+	const std::set<std::string> english = readLocaleKeys("en-US.ini");
+	const std::set<std::string> korean = readLocaleKeys("ko-KR.ini");
+	const std::regex textCall(R"re(obs_module_text\(\s*"([^"]+)"\s*\))re");
+	std::vector<std::string> missing;
+	for (const auto &entry : std::filesystem::recursive_directory_iterator(
+		     std::string(OBS_DETECT_SOURCE_DIR) + "/src")) {
+		const std::string extension = entry.path().extension().string();
+		if (extension != ".cpp" && extension != ".c" && extension != ".h")
+			continue;
+		std::ifstream input(entry.path());
+		std::ostringstream contents;
+		contents << input.rdbuf();
+		const std::string source = contents.str();
+		for (std::sregex_iterator it(source.begin(), source.end(), textCall), end; it != end;
+		     ++it) {
+			const std::string key = (*it)[1];
+			if (!english.count(key))
+				missing.push_back("en-US: " + key);
+			if (!korean.count(key))
+				missing.push_back("ko-KR: " + key);
+		}
+	}
+	for (const std::string &key : missing)
+		std::cerr << "Missing locale key " << key << '\n';
+	require(missing.empty(), "every obs_module_text key must exist in both locale files");
+}
+
 int main()
 {
 	try {
@@ -463,6 +531,8 @@ int main()
 		testShaderMaskContract();
 		testZeroCopySelection();
 		testStateHistorySnapshotMatchesLiveQueries();
+		testEveryUiTextKeyIsTranslated();
+		testFaceRecheckSecondsRoundTrip();
 	} catch (const std::exception &error) {
 		std::cerr << "Safety test failed: " << error.what() << '\n';
 		return 1;
