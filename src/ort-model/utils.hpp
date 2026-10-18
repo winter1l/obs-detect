@@ -59,7 +59,8 @@ static void draw_objects(cv::Mat bgr, const std::vector<Object> &objects,
 	for (size_t i = 0; i < objects.size(); i++) {
 		const Object &obj = objects[i];
 
-		int color_index = obj.label % 80;
+		const bool hasClassName = obj.label >= 0 && (size_t)obj.label < class_names.size();
+		int color_index = obj.label >= 0 ? obj.label % 80 : 0;
 		cv::Scalar color = cv::Scalar(color_list[color_index][0] * 255.0,
 					      color_list[color_index][1] * 255.0,
 					      color_list[color_index][2] * 255.0, 255.0);
@@ -83,7 +84,9 @@ static void draw_objects(cv::Mat bgr, const std::vector<Object> &objects,
 		cv::rectangle(bgr, obj.rect, color, 2);
 
 		char base_text[128];
-		snprintf(base_text, sizeof(base_text), "%s %.1f%%", class_names[obj.label].c_str(), obj.prob * 100);
+		snprintf(base_text, sizeof(base_text), "%s %.1f%%",
+			 hasClassName ? class_names[(size_t)obj.label].c_str() : "unknown",
+			 obj.prob * 100);
 
 		std::string status_text = "";
 		cv::Scalar status_bg_color = color * 0.7;

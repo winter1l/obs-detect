@@ -19,16 +19,11 @@ YOLOv8FaceONNX::YOLOv8FaceONNX(file_name_t path_to_model, int intra_op_num_threa
 
 std::vector<Object> YOLOv8FaceONNX::inference(const cv::Mat &frame)
 {
-	cv::Mat rgb_frame;
-	cv::cvtColor(frame, rgb_frame, cv::COLOR_BGR2RGB);
-	cv::Mat pr_img = static_resize(rgb_frame, 0);
+	lastTimings_ = {};
+	auto stageStart = std::chrono::steady_clock::now();
+	// RGB input scaled to [0, 1].
 	float *blob_data = (float *)(this->input_buffer_[0].get());
-	blobFromImage(pr_img, blob_data);
-
-	size_t input_size = input_w_[0] * input_h_[0] * 3;
-	for (size_t i = 0; i < input_size; ++i) {
-		blob_data[i] /= 255.0f;
-	}
+	letterboxToBlob(frame, 0, blob_data, true, 1.0f / 255.0f);
 
 	std::vector<const char *> input_names;
 	for (size_t i = 0; i < this->input_name_.size(); i++) {
@@ -39,10 +34,18 @@ std::vector<Object> YOLOv8FaceONNX::inference(const cv::Mat &frame)
 		output_names.push_back(this->output_name_[i].c_str());
 	}
 
+	lastTimings_.preprocessMs = elapsedMs(stageStart);
+	stageStart = std::chrono::steady_clock::now();
 	Ort::RunOptions run_options;
 	auto output_tensors = this->session_.Run(
 		run_options, input_names.data(), this->input_tensor_.data(),
 		this->input_tensor_.size(), output_names.data(), output_names.size());
+	lastTimings_.runMs = elapsedMs(stageStart);
+	struct PostprocessTimer {
+		InferenceTimings &timings;
+		std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+		~PostprocessTimer() { timings.postprocessMs = elapsedMs(start); }
+	} postprocessTimer{lastTimings_};
 
 	float scale = std::fminf((float)input_w_[0] / (float)frame.cols,
 				 (float)input_h_[0] / (float)frame.rows);

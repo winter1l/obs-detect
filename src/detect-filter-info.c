@@ -10,6 +10,7 @@ struct obs_source_info detect_filter_info = {
 	.get_defaults = detect_filter_defaults,
 	.get_properties = detect_filter_properties,
 	.update = detect_filter_update,
+	.load = detect_filter_load,
 	.activate = detect_filter_activate,
 	.deactivate = detect_filter_deactivate,
 	.video_tick = detect_filter_video_tick,

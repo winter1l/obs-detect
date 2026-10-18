@@ -21,6 +21,12 @@
 !.agents
 !.agent
 
+# Track only the maintained safety tests. Local experimental harnesses remain ignored.
+!/tests/
+/tests/*
+!/tests/CMakeLists.txt
+!/tests/test_safety.cpp
+
 # Exclude lock files
 *.lock.json
 

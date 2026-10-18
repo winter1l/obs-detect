@@ -4,9 +4,6 @@ uniform texture2d image;
 uniform float xOffset;
 uniform float yOffset;
 
-uniform float4 mask_rects[64];
-uniform int num_mask_rects;
-
 sampler_state textureSampler {
 	Filter    = Linear;
 	AddressU  = Clamp;
@@ -31,32 +28,6 @@ VertDataOut VSDefault(VertDataOut v_in)
 	return vert_out;
 }
 
-uniform float feather_pixels;
-uniform float2 tex_size;
-
-bool IsInBounds(float2 uv)
-{
-    float2 pixel_pos = uv * tex_size;
-    // Add generous padding for blur spread + feather
-    float padding = feather_pixels + 300.0; 
-
-    for (int i = 0; i < 64; ++i) {
-        if (i >= num_mask_rects) break;
-        float4 r = mask_rects[i];
-        
-        float2 center = float2(r.x + r.z * 0.5, r.y + r.w * 0.5) * tex_size;
-        float2 half_size = float2(r.z * 0.5, r.w * 0.5) * tex_size;
-        
-        float2 d = abs(pixel_pos - center) - half_size;
-        float dist = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
-        
-        if (dist <= padding) {
-            return true;
-        }
-    }
-    return false;
-}
-
 /**
  * Standard Kawase blur
  */
@@ -72,38 +43,11 @@ float4 PSKawaseBlur(VertDataOut v_in) : TARGET
 	return sum;
 }
 
-/**
- * Mask aware Kawase blur (Optimized)
- * Only blurs the expanded region around the masks to save GPU time.
- */
-float4 PSKawaseBlurMaskAware(VertDataOut v_in) : TARGET
-{
-	if (!IsInBounds(v_in.uv)) {
-		return image.Sample(textureSampler, v_in.uv);
-	}
-
-	float4 sum = float4(0.0, 0.0, 0.0, 0.0);
-	sum += image.Sample(textureSampler, v_in.uv + float2( xOffset,  yOffset));
-	sum += image.Sample(textureSampler, v_in.uv + float2(-xOffset,  yOffset));
-	sum += image.Sample(textureSampler, v_in.uv + float2( xOffset, -yOffset));
-	sum += image.Sample(textureSampler, v_in.uv + float2(-xOffset, -yOffset));
-	return sum * 0.25;
-}
-
 technique Draw
 {
 	pass
 	{
 		vertex_shader = VSDefault(v_in);
 		pixel_shader  = PSKawaseBlur(v_in);
-	}
-}
-
-technique DrawMaskAware
-{
-	pass
-	{
-		vertex_shader = VSDefault(v_in);
-		pixel_shader  = PSKawaseBlurMaskAware(v_in);
 	}
 }

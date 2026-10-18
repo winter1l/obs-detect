@@ -10,7 +10,8 @@
 #include <string>
 #include <tuple>
 #include <atomic>
-
+#include <chrono>
+#include <stdexcept>
 
 #include "types.hpp"
 
@@ -49,6 +50,8 @@ typedef struct gs_texture gs_texture_t;
 // Generic class for ONNXRuntime models
 class ONNXRuntimeModel {
 public:
+	static constexpr bool kSupportsZeroCopy = false;
+
 	// default constructor
 	ONNXRuntimeModel() {}
 	// constructor with parameters
@@ -63,24 +66,49 @@ public:
 #endif
 	}
 
+	// CPU time of the stages of the most recent inference() call.
+	struct InferenceTimings {
+		double preprocessMs = 0.0;
+		double runMs = 0.0;
+		double postprocessMs = 0.0;
+	};
+	const InferenceTimings &lastTimings() const { return lastTimings_; }
+
 	void setBBoxConfThresh(float thresh) { this->bbox_conf_thresh_ = thresh; }
 	void setNmsThresh(float thresh) { this->nms_thresh_ = thresh; }
 
 	virtual std::vector<Object> inference(const cv::Mat &frame) = 0;
 
+	// Size each frame is letterboxed into before inference, or an empty size when the
+	// model takes frames at their own resolution. Callers may pre-shrink frames to it,
+	// and such models accept BGRA frames as well as BGR.
+	virtual cv::Size letterboxInputSize() const { return cv::Size(); }
+
 #ifdef _WIN32
+	virtual bool supports_zero_copy() const noexcept { return kSupportsZeroCopy; }
 	virtual std::vector<Object> inference_gpu() {
-		return std::vector<Object>();
+		throw std::logic_error("GPU zero-copy inference is not implemented by this model");
 	}
 	bool is_gpu_pipeline_ready() const { return gpu_pipeline_ready_; }
+	bool is_gpu_pipeline_ready_for(int width, int height) const
+	{
+		return gpu_pipeline_ready_ && sharedWidth_ == width && sharedHeight_ == height;
+	}
 	bool is_gpu_pipeline_initialized() const { return gpu_pipeline_initialized_; }
 	bool initialize_gpu(ID3D11Device* d3d11Device, int width, int height);
 	bool copy_d3d11_texture(gs_texture_t *obsSourceTexture);
 #endif
 
 protected:
-	cv::Mat static_resize(const cv::Mat &img, const int input_index);
-	void blobFromImage(const cv::Mat &img, float *blob_data);
+	cv::Size firstInputSize() const
+	{
+		return input_w_.empty() || input_h_.empty() ? cv::Size()
+							      : cv::Size(input_w_[0], input_h_[0]);
+	}
+	// Letterboxes a BGR or BGRA frame into the NCHW input blob (padding value 114),
+	// optionally swapping red and blue and scaling every value.
+	void letterboxToBlob(const cv::Mat &img, const int input_index, float *blob_data,
+			     bool swapRB = false, float scale = 1.0f);
 	void blobFromImage_nhwc(const cv::Mat &img, float *blob_data);
 	float intersection_area(const Object &a, const Object &b);
 	void qsort_descent_inplace(std::vector<Object> &faceobjects, int left, int right);
@@ -91,6 +119,14 @@ protected:
 	// run inference on the model with the given frame that should go in the input index
 	void inference(const cv::Mat &frame, const int input_index);
 
+	static double elapsedMs(std::chrono::steady_clock::time_point start)
+	{
+		return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+								 start)
+			.count();
+	}
+
+	InferenceTimings lastTimings_;
 	std::vector<int> input_w_;
 	std::vector<int> input_h_;
 	float nms_thresh_;

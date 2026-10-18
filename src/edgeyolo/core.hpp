@@ -41,6 +41,10 @@ protected:
 			const int basic_pos = idx * (num_classes_ + 5);
 
 			float box_objectness = feat_ptr[basic_pos + 4];
+			// Class scores are at most 1, so no class can pass the threshold when the
+			// objectness alone does not.
+			if (box_objectness <= prob_threshold)
+				continue;
 			int class_id = 0;
 			float max_class_score = 0.0;
 			for (int class_idx = 0; class_idx < num_classes_; ++class_idx) {

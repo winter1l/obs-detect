@@ -4,12 +4,14 @@
 #include <obs-module.h>
 #include <util/circlebuf.h>
 #include "ort-model/ONNXRuntimeModel.h"
+#include "FaceInferenceQueue.h"
+#include "FaceStateStore.h"
+#include "StageProfiler.h"
 #include "sort/Sort.h"
 #include "sort/StateHistory.h"
 #include "yunet/YuNet.h"
 #include "sface/SFace.h"
 #include <unordered_map>
-#include <unordered_set>
 #include <chrono>
 #include <vector>
 #include <map>
@@ -20,9 +22,29 @@
 #include <condition_variable>
 #include <functional>
 
+struct PreviewLabel {
+	std::string text;
+	cv::Point origin;
+	cv::Scalar color;
+	bool operator==(const PreviewLabel &other) const
+	{
+		return text == other.text && origin == other.origin && color == other.color;
+	}
+};
+
 struct DebugFaceBox {
 	cv::Rect2f rect;
 	std::chrono::steady_clock::time_point timestamp;
+};
+
+enum class InferenceMode { OwnedBGRA, GPUZeroCopy };
+
+struct InferenceJob {
+	InferenceMode mode = InferenceMode::OwnedBGRA;
+	cv::Mat ownedBGRA;
+	uint32_t sourceWidth = 0;
+	uint32_t sourceHeight = 0;
+	uint64_t frameId = 0;
 };
 
 /**
@@ -41,22 +63,23 @@ struct filter_data {
 	int maxExemptPersons;
 	int minHitFrames;
 	int objectCategory;
-	bool enableFaceExclusion;
+	std::atomic<bool> enableFaceExclusion{false};
 	std::string referenceFacePath;
 	float faceMatchThreshold;
 	int personCategory;
 	float minFaceAreaRatio;
 	int faceInferenceInterval;
-
-	enum FaceStatus { UNKNOWN, CHECKING, IS_ME, NOT_ME };
-	std::unordered_map<uint64_t, FaceStatus> faceStatusCache;
-	std::unordered_map<uint64_t, float> faceSimilarityCache;
+	std::atomic<bool> preserveFaceExclusionOnRecovery{false};
+	FaceStateStore faceState;
 	std::vector<std::vector<float>> referenceFaceFeatures;
 	int last_excluded_count = -1;
 	bool referenceFacesAttempted = false;
 
 	gs_texture_t *previewTexture = nullptr;
-	gs_texture_t *renderMaskTexture = nullptr;
+	gs_texrender_t *maskTexrender = nullptr;
+	gs_effect_t *maskShapeEffect = nullptr;
+	bool maskForceFullscreen = false;
+	std::chrono::steady_clock::time_point lastMaskFailureLog;
 	uint32_t lastTexWidth = 0;
 	uint32_t lastTexHeight = 0;
 
@@ -100,7 +123,6 @@ struct filter_data {
 	// create SORT tracker
 	Sort tracker;
 	std::shared_ptr<StateHistoryManager> stateHistory;
-	std::unordered_set<uint64_t> faceExemptIds;
 
 	obs_source_t *source;
 	gs_texrender_t *texrender;
@@ -119,14 +141,22 @@ struct filter_data {
 	uint64_t currentFrameId = 0;
 	
 	std::vector<gs_texture_t*> texturePool;
-	gs_stagesurf_t *stagesurface;
+	// Readback is asynchronous: a frame is staged in one surface and mapped one render
+	// later, after the GPU has finished the copy, so mapping does not stall.
+	gs_stagesurf_t *stageSurfaces[2] = {nullptr, nullptr};
+	int stageWriteIndex = 0;
+	bool stagePending = false;
+	uint64_t stagedFrameId = 0;
 	gs_effect_t *kawaseBlurEffect;
 	gs_effect_t *maskingEffect;
 	gs_effect_t *pixelateEffect;
-	gs_texture_t *baseTexture;
+	// Reused render targets for the blur passes (ping-pong) and pixelation.
+	gs_texrender_t *blurTexrenders[2] = {nullptr, nullptr};
+	gs_texrender_t *pixelateTexrender = nullptr;
 
-	bool useGpuZeroCopyCurrentFrame = false;
+	std::atomic<bool> zeroCopyRuntimeHealthy{true};
 	cv::Mat inputBGRA;
+	uint64_t inputBGRAFrameId = 0;
 	std::mutex inputBGRALock;
 
 	// Audio sync
@@ -137,6 +167,13 @@ struct filter_data {
 	bool resetAudio = false;
 
 	std::map<uint64_t, cv::Mat> previewHistory;
+	// Overlays older than this many frames behind the newest one are no longer needed
+	// by the delayed render. Set by the render thread from the current delay.
+	std::atomic<int> previewHistoryKeepFrames{120};
+	// Last overlay uploaded to previewTexture, so unchanged frames skip the upload.
+	cv::Mat previewComposite;
+	uint64_t previewOverlayFrameId = 0;
+	std::vector<PreviewLabel> previewLabels;
 	cv::Mat outputMask;
 	std::vector<Object> latestObjects;
 
@@ -159,19 +196,21 @@ struct filter_data {
 	std::mutex inferenceMutex;
 	std::condition_variable inferenceCV;
 	std::atomic<bool> isInferencing;
-	cv::Mat inferenceInputFrame;
+	// When the running inference started and how long inferences take on average, so
+	// the render thread can skip copying frames that inference could not take in time.
+	std::atomic<int64_t> inferenceStartNs{0};
+	std::atomic<double> inferenceAvgMs{0.0};
+	InferenceJob inferenceJob;
 	cv::Rect inferenceCropRect;
 	bool inferenceFrameReady;
-	uint64_t inferenceFrameId;
-	uint64_t frameCount;
+	uint64_t lastQueuedInferenceFrameId = 0;
 
 	// Face Inference background thread
 	std::thread faceInferenceThread;
 	std::atomic<bool> stopFaceInferenceThread;
 	std::mutex faceInferenceMutex;
-	std::condition_variable faceInferenceCV;
-	std::vector<Object> faceInferenceQueue;
-	cv::Mat faceInferenceFrame;
+	FaceInferenceQueue faceInferenceJobs{4};
+	std::chrono::steady_clock::time_point lastFaceQueueFullLog;
 
 	// File IO background thread
 	std::thread ioThread;
@@ -184,6 +223,45 @@ struct filter_data {
 
 	std::unique_ptr<ONNXRuntimeModel> onnxruntimemodel;
 	std::vector<std::string> classNames;
+
+	// Model state readable from the graphics and audio threads without modelMutex.
+	bool effectsLoaded = false;
+	std::atomic<bool> modelLoaded{false};
+	std::atomic<bool> useDirectML{false};
+	std::atomic<bool> modelSupportsZeroCopy{false};
+	std::atomic<bool> zeroCopyPipelineReady{false};
+
+	// Tracker resets are requested from other threads and applied by the inference thread.
+	std::atomic<uint64_t> trackerResetGeneration{0};
+	uint64_t appliedTrackerResetGeneration = 0;
+	int coverageUpdates = 0;
+	// Frames before coverageStartFrameId or after lastCoveredFrameId have no reliable
+	// detections, so masking falls back to a full-frame mask for them.
+	std::atomic<uint64_t> coverageStartFrameId{0};
+	std::atomic<uint64_t> lastCoveredFrameId{0};
+
+	// Tracking (zoom-follow) crop filter is attached once the filter has a parent.
+	bool trackingRequested = false;
+	// The crop filter is looked up by name, so it may only be attached after a scene
+	// collection load has added the saved filters (load callback), or after a grace
+	// period for filters that are never loaded (added from the UI, duplicated).
+	std::atomic<bool> loadCompleted{false};
+	uint64_t ticksSinceCreate = 0;
+
+	// Optional per-stage CPU timing (debug option), summarized in the OBS log.
+	std::atomic<bool> profilingEnabled{false};
+	StageProfiler profiler;
+
+	// Track switch detection (log only). Inference thread only, except the setting.
+	struct ExemptTrackSample {
+		cv::Rect2f rect;
+		uint64_t unseenFrames = 0;
+	};
+	std::atomic<int> trackSwitchDetection{0};
+	std::unordered_map<uint64_t, ExemptTrackSample> exemptTrackLastRects;
+	std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> trackSwitchSuspects;
+	std::chrono::steady_clock::time_point lastTrackSwitchLog;
+	int suppressedTrackSwitchLogs = 0;
 
 #if _WIN32
 	std::wstring modelFilepath;

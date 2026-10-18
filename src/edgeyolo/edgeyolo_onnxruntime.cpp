@@ -25,8 +25,10 @@ std::vector<Object> EdgeYOLOONNXRuntime::inference(const cv::Mat &frame)
 	float scale = std::fminf((float)input_w_[0] / (float)frame.cols,
 				 (float)input_h_[0] / (float)frame.rows);
 	std::vector<Object> objects;
+	const auto postStart = std::chrono::steady_clock::now();
 	decode_outputs(net_pred, this->num_array_, objects, this->bbox_conf_thresh_, scale,
 		       frame.cols, frame.rows);
+	lastTimings_.postprocessMs = elapsedMs(postStart);
 	return objects;
 }
 

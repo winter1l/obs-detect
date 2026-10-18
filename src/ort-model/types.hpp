@@ -17,6 +17,7 @@ struct Object {
 	int label;
 	float prob;
 	uint64_t id = 0;
+	uint64_t identityEpoch = 1;
 	uint64_t unseenFrames = 0;
 	cv::KalmanFilter kf;
 	std::deque<cv::Rect_<float>> lastVisibleRects;

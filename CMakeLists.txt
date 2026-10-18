@@ -88,6 +88,12 @@ target_sources(
           src/detect-filter.cpp
           src/detect-filter-info.c
           src/detect-filter-utils.cpp
+          src/FaceInferenceQueue.cpp
+          src/FaceReferenceSelection.cpp
+          src/FaceStateStore.cpp
+          src/FrameUtils.cpp
+          src/MaskGeometry.cpp
+          src/StageProfiler.cpp
           src/obs-utils/obs-utils.cpp
           src/ort-model/ONNXRuntimeModel.cpp
           src/ort-model/YOLOv8FaceONNX.cpp
@@ -101,6 +107,11 @@ set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_nam
 
 if(WIN32)
   target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE d3d11.lib d3dcompiler.lib)
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+  add_subdirectory(tests)
 endif()
 
 if(OS_LINUX OR OS_MACOS)

@@ -82,6 +82,24 @@ runs:
 
         .github/scripts/Build-Windows.ps1 @BuildArgs
 
+    - name: Run macOS Tests
+      if: runner.os == 'macOS'
+      shell: zsh --no-rcs --errexit --pipefail {0}
+      working-directory: ${{ inputs.workingDirectory }}
+      run: ctest --test-dir build_macos -C ${{ inputs.config }} --output-on-failure
+
+    - name: Run Ubuntu Tests
+      if: runner.os == 'Linux'
+      shell: bash
+      working-directory: ${{ inputs.workingDirectory }}
+      run: ctest --test-dir build_${{ inputs.target }} -C ${{ inputs.config }} --output-on-failure
+
+    - name: Run Windows Tests
+      if: runner.os == 'Windows'
+      shell: pwsh
+      working-directory: ${{ inputs.workingDirectory }}
+      run: ctest --test-dir build_x64 -C ${{ inputs.config }} --output-on-failure
+
     - name: Create Summary 📊
       if: contains(fromJSON('["Linux", "macOS"]'),runner.os)
       shell: zsh --no-rcs --errexit --pipefail {0}

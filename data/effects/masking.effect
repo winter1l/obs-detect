@@ -1,9 +1,8 @@
 uniform float4x4 ViewProj;
 uniform texture2d image;
 uniform float4 color = {1.0, 1.0, 1.0, 1.0};
-
-uniform float4 mask_rects[64];
-uniform int num_mask_rects;
+uniform texture2d mask_texture;
+uniform bool force_full_mask;
 
 sampler_state textureSampler {
 	Filter    = Linear;
@@ -29,40 +28,9 @@ VertDataOut VSDefault(VertDataOut v_in)
 	return vert_out;
 }
 
-uniform float feather_pixels;
-uniform float2 tex_size;
-
 float GetMaskVal(float2 uv)
 {
-	float sum_alpha = 0.0;
-	float2 pixel_pos = uv * tex_size;
-
-	for (int i = 0; i < 64; ++i) {
-		if (i >= num_mask_rects) break;
-		float4 r = mask_rects[i];
-		
-		float2 center = float2(r.x + r.z * 0.5, r.y + r.w * 0.5) * tex_size;
-		float2 half_size = float2(r.z * 0.5, r.w * 0.5) * tex_size;
-		
-		// Apply corner radius proportional to feather to prevent angular corners
-		float corner_radius = feather_pixels;
-		float2 adjusted_half_size = max(half_size - corner_radius, 0.0);
-		
-		float2 d = abs(pixel_pos - center) - adjusted_half_size;
-		float dist = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - corner_radius;
-		
-		float alpha = 1.0;
-		if (feather_pixels > 0.0) {
-			// Extend feather strictly outward (dist 0 to feather) 
-			// so the inside is 100% solid, matching the Multiplier: 3 look
-			alpha = smoothstep(feather_pixels, 0.0, dist);
-		} else {
-			alpha = dist <= 0.0 ? 1.0 : 0.0;
-		}
-		// Screen Blending: A + B - (A * B)
-		sum_alpha = sum_alpha + alpha - (sum_alpha * alpha);
-	}
-	return sum_alpha;
+	return force_full_mask ? 1.0 : mask_texture.Sample(textureSampler, uv).r;
 }
 
 uniform texture2d base_image;

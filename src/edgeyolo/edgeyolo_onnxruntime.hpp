@@ -21,6 +21,7 @@ public:
 			    const std::string &use_gpu_ = "", int device_id = 0,
 			    bool use_parallel = false, float nms_th = 0.45f, float conf_th = 0.3f);
 	std::vector<Object> inference(const cv::Mat &frame) override;
+	cv::Size letterboxInputSize() const override { return firstInputSize(); }
 };
 
 } // namespace edgeyolo_cpp
