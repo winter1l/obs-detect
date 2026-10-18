@@ -79,6 +79,10 @@ public:
 
 	virtual std::vector<Object> inference(const cv::Mat &frame) = 0;
 
+	// Size each frame is letterboxed into before inference, or an empty size when the
+	// model takes frames at their own resolution. Callers may pre-shrink frames to it.
+	virtual cv::Size letterboxInputSize() const { return cv::Size(); }
+
 #ifdef _WIN32
 	virtual bool supports_zero_copy() const noexcept { return kSupportsZeroCopy; }
 	virtual std::vector<Object> inference_gpu() {
@@ -95,6 +99,11 @@ public:
 #endif
 
 protected:
+	cv::Size firstInputSize() const
+	{
+		return input_w_.empty() || input_h_.empty() ? cv::Size()
+							      : cv::Size(input_w_[0], input_h_[0]);
+	}
 	cv::Mat static_resize(const cv::Mat &img, const int input_index);
 	void blobFromImage(const cv::Mat &img, float *blob_data);
 	void blobFromImage_nhwc(const cv::Mat &img, float *blob_data);

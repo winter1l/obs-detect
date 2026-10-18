@@ -22,6 +22,16 @@
 #include <condition_variable>
 #include <functional>
 
+struct PreviewLabel {
+	std::string text;
+	cv::Point origin;
+	cv::Scalar color;
+	bool operator==(const PreviewLabel &other) const
+	{
+		return text == other.text && origin == other.origin && color == other.color;
+	}
+};
+
 struct DebugFaceBox {
 	cv::Rect2f rect;
 	std::chrono::steady_clock::time_point timestamp;
@@ -131,11 +141,18 @@ struct filter_data {
 	uint64_t currentFrameId = 0;
 	
 	std::vector<gs_texture_t*> texturePool;
-	gs_stagesurf_t *stagesurface;
+	// Readback is asynchronous: a frame is staged in one surface and mapped one render
+	// later, after the GPU has finished the copy, so mapping does not stall.
+	gs_stagesurf_t *stageSurfaces[2] = {nullptr, nullptr};
+	int stageWriteIndex = 0;
+	bool stagePending = false;
+	uint64_t stagedFrameId = 0;
 	gs_effect_t *kawaseBlurEffect;
 	gs_effect_t *maskingEffect;
 	gs_effect_t *pixelateEffect;
-	gs_texture_t *baseTexture;
+	// Reused render targets for the blur passes (ping-pong) and pixelation.
+	gs_texrender_t *blurTexrenders[2] = {nullptr, nullptr};
+	gs_texrender_t *pixelateTexrender = nullptr;
 
 	std::atomic<bool> zeroCopyRuntimeHealthy{true};
 	cv::Mat inputBGRA;
@@ -150,6 +167,13 @@ struct filter_data {
 	bool resetAudio = false;
 
 	std::map<uint64_t, cv::Mat> previewHistory;
+	// Overlays older than this many frames behind the newest one are no longer needed
+	// by the delayed render. Set by the render thread from the current delay.
+	std::atomic<int> previewHistoryKeepFrames{120};
+	// Last overlay uploaded to previewTexture, so unchanged frames skip the upload.
+	cv::Mat previewComposite;
+	uint64_t previewOverlayFrameId = 0;
+	std::vector<PreviewLabel> previewLabels;
 	cv::Mat outputMask;
 	std::vector<Object> latestObjects;
 
@@ -172,6 +196,10 @@ struct filter_data {
 	std::mutex inferenceMutex;
 	std::condition_variable inferenceCV;
 	std::atomic<bool> isInferencing;
+	// When the running inference started and how long inferences take on average, so
+	// the render thread can skip copying frames that inference could not take in time.
+	std::atomic<int64_t> inferenceStartNs{0};
+	std::atomic<double> inferenceAvgMs{0.0};
 	InferenceJob inferenceJob;
 	cv::Rect inferenceCropRect;
 	bool inferenceFrameReady;

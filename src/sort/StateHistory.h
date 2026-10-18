@@ -49,6 +49,13 @@ public:
 	
 	// 전체 버퍼 순회를 위해 락을 건 복사본 반환 (안전한 조회를 위함)
 	std::deque<FrameStateHistory> get_buffer_copy() const;
+
+	// Same lookups as above on a copy from get_buffer_copy(), so a caller can take one
+	// snapshot and query it many times.
+	static bool find_object_state(const std::deque<FrameStateHistory> &buffer, uint64_t frame_id,
+				      int object_id, TrackedObjectState &out_state);
+	static std::set<int> collect_active_ids(const std::deque<FrameStateHistory> &buffer,
+						uint64_t start_frame, uint64_t end_frame);
 };
 
 #endif // STATEHISTORY_H

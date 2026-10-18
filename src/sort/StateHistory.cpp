@@ -16,6 +16,13 @@ void StateHistoryManager::push_frame_state(uint64_t frame_id, const std::map<int
 bool StateHistoryManager::get_object_state(uint64_t frame_id, int object_id, TrackedObjectState &out_state) const
 {
 	std::lock_guard<std::mutex> lock(mutex_);
+	return find_object_state(buffer, frame_id, object_id, out_state);
+}
+
+bool StateHistoryManager::find_object_state(const std::deque<FrameStateHistory> &buffer,
+					    uint64_t frame_id, int object_id,
+					    TrackedObjectState &out_state)
+{
 	for (auto it = buffer.rbegin(); it != buffer.rend(); ++it) {
 		if (it->frame_id <= frame_id) {
 			auto obj_it = it->objects.find(object_id);
@@ -48,6 +55,12 @@ void StateHistoryManager::retroactively_confirm(uint64_t start_frame, uint64_t e
 std::set<int> StateHistoryManager::get_all_active_ids(uint64_t start_frame, uint64_t end_frame) const
 {
 	std::lock_guard<std::mutex> lock(mutex_);
+	return collect_active_ids(buffer, start_frame, end_frame);
+}
+
+std::set<int> StateHistoryManager::collect_active_ids(const std::deque<FrameStateHistory> &buffer,
+						      uint64_t start_frame, uint64_t end_frame)
+{
 	std::set<int> active_ids;
 	for (const auto &history : buffer) {
 		if (history.frame_id >= start_frame && history.frame_id <= end_frame) {

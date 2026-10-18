@@ -4,6 +4,7 @@
 #include "FrameUtils.h"
 #include "InferenceSafety.h"
 #include "MaskGeometry.h"
+#include "sort/StateHistory.h"
 
 #include <atomic>
 #include <cstdint>
@@ -411,6 +412,39 @@ static void testZeroCopySelection()
 		"face exclusion requires an owned frame");
 }
 
+static void testStateHistorySnapshotMatchesLiveQueries()
+{
+	StateHistoryManager history;
+	auto state = [](int id, float x) {
+		TrackedObjectState s;
+		s.id = id;
+		s.rect = cv::Rect2f(x, 0.0f, 10.0f, 10.0f);
+		s.is_confirmed = true;
+		return s;
+	};
+	history.push_frame_state(10, {{1, state(1, 1.0f)}});
+	history.push_frame_state(12, {{1, state(1, 2.0f)}, {2, state(2, 5.0f)}});
+	history.push_frame_state(15, {{2, state(2, 6.0f)}});
+
+	const auto snapshot = history.get_buffer_copy();
+	for (uint64_t frame : {9, 10, 11, 12, 14, 15, 20}) {
+		for (int id : {1, 2, 3}) {
+			TrackedObjectState live, copied;
+			const bool liveFound = history.get_object_state(frame, id, live);
+			const bool copiedFound =
+				StateHistoryManager::find_object_state(snapshot, frame, id, copied);
+			require(liveFound == copiedFound && (!liveFound || live.rect == copied.rect),
+				"snapshot lookups must match the live history");
+		}
+		require(history.get_all_active_ids(frame, 20) ==
+				StateHistoryManager::collect_active_ids(snapshot, frame, 20),
+			"snapshot active ids must match the live history");
+	}
+	TrackedObjectState missing;
+	require(!StateHistoryManager::find_object_state(snapshot, 15, 1, missing),
+		"an object absent from the closest frame has disappeared");
+}
+
 int main()
 {
 	try {
@@ -428,6 +462,7 @@ int main()
 		testUnlimitedMaskGeometry();
 		testShaderMaskContract();
 		testZeroCopySelection();
+		testStateHistorySnapshotMatchesLiveQueries();
 	} catch (const std::exception &error) {
 		std::cerr << "Safety test failed: " << error.what() << '\n';
 		return 1;

@@ -68,6 +68,13 @@ static uint64_t face_now_ms()
 		.count();
 }
 
+static int64_t steady_now_ns()
+{
+	return std::chrono::duration_cast<std::chrono::nanoseconds>(
+		       std::chrono::steady_clock::now().time_since_epoch())
+		.count();
+}
+
 static StageProfiler *active_profiler(filter_data *tf)
 {
 	return tf->profilingEnabled ? &tf->profiler : nullptr;
@@ -1241,6 +1248,8 @@ static void clear_all_buffers(struct detect_filter *tf, bool in_graphics_ctx)
 		if (!in_graphics_ctx) obs_leave_graphics();
 		cleared_any = true;
 	}
+	// A frame staged before the reset must not be read back afterwards.
+	tf->stagePending = false;
 
 	{
 		std::lock_guard<std::mutex> lock(tf->outputLock);
@@ -1369,9 +1378,15 @@ static void detect_exempt_track_switches(struct detect_filter *tf,
 static void run_model_inference(struct detect_filter *tf, InferenceJob job)
 {
 	struct InferenceCompletionGuard {
-		std::atomic<bool> &flag;
-		~InferenceCompletionGuard() { flag = false; }
-	} completionGuard{tf->isInferencing};
+		detect_filter *tf;
+		~InferenceCompletionGuard()
+		{
+			const double ms = (double)(steady_now_ns() - tf->inferenceStartNs) / 1e6;
+			const double average = tf->inferenceAvgMs;
+			tf->inferenceAvgMs = average <= 0.0 ? ms : average * 0.9 + ms * 0.1;
+			tf->isInferencing = false;
+		}
+	} completionGuard{tf};
 
 	StageProfiler *profiler = active_profiler(tf);
 	ScopedStage totalStage(profiler, StageProfiler::InferenceTotal);
@@ -1440,13 +1455,28 @@ static void run_model_inference(struct detect_filter *tf, InferenceJob job)
 			}
 			cropRect = cv::Rect(tf->crop_left, tf->crop_top, cropWidth, cropHeight);
 		}
+		// Models that letterbox their input would shrink the frame anyway, so shrink it
+		// first and convert only the small frame. Detections are scaled back below.
+		float detectionScaleX = 1.0f;
+		float detectionScaleY = 1.0f;
 		try {
 			ScopedStage cvtStage(profiler, StageProfiler::InferenceCvtColor);
-			if (tf->crop_enabled)
-				cv::cvtColor(imageBGRA(cropRect), inferenceFrame,
-					     cv::COLOR_BGRA2BGR);
-			else
-				cv::cvtColor(imageBGRA, inferenceFrame, cv::COLOR_BGRA2BGR);
+			cv::Mat source = imageBGRA(cropRect);
+			const cv::Size inputSize = tf->onnxruntimemodel->letterboxInputSize();
+			if (inputSize.width > 0 && inputSize.height > 0) {
+				const float ratio = std::min((float)inputSize.width / (float)source.cols,
+							     (float)inputSize.height / (float)source.rows);
+				const int scaledWidth = (int)(ratio * (float)source.cols);
+				const int scaledHeight = (int)(ratio * (float)source.rows);
+				if (ratio < 1.0f && scaledWidth > 0 && scaledHeight > 0) {
+					cv::Mat scaled;
+					cv::resize(source, scaled, cv::Size(scaledWidth, scaledHeight));
+					detectionScaleX = (float)source.cols / (float)scaledWidth;
+					detectionScaleY = (float)source.rows / (float)scaledHeight;
+					source = scaled;
+				}
+			}
+			cv::cvtColor(source, inferenceFrame, cv::COLOR_BGRA2BGR);
 		} catch (const cv::Exception &e) {
 			obs_log(LOG_ERROR, "Inference frame preprocessing failed: %s", e.what());
 			return;
@@ -1466,6 +1496,19 @@ static void run_model_inference(struct detect_filter *tf, InferenceJob job)
 		} catch (const std::exception &e) {
 			obs_log(LOG_ERROR, "%s", e.what());
 			return;
+		}
+
+		if (detectionScaleX != 1.0f || detectionScaleY != 1.0f) {
+			for (Object &obj : objects) {
+				obj.rect.x *= detectionScaleX;
+				obj.rect.y *= detectionScaleY;
+				obj.rect.width *= detectionScaleX;
+				obj.rect.height *= detectionScaleY;
+				for (int n = 0; n < 5; n++) {
+					obj.landmarks[n].x *= detectionScaleX;
+					obj.landmarks[n].y *= detectionScaleY;
+				}
+			}
 		}
 
 		if (tf->crop_enabled) {
@@ -1607,7 +1650,9 @@ static void run_model_inference(struct detect_filter *tf, InferenceJob job)
 				FaceInferenceJob faceJob;
 				{
 					ScopedStage cloneStage(profiler, StageProfiler::FaceJobClone);
-					faceJob.imageBGRA = imageBGRA.clone();
+					// Shared, not copied: nothing writes to this frame after
+					// inference, and every readback allocates a new one.
+					faceJob.imageBGRA = imageBGRA;
 				}
 				faceJob.requests = requests;
 				faceJob.frameId = inferenceFrameId;
@@ -1719,16 +1764,18 @@ static void run_model_inference(struct detect_filter *tf, InferenceJob job)
 
 	if (tf->preview || tf->debugMode || tf->enableFaceStats || tf->showYuNetDetections) {
 		ScopedStage overlayStage(profiler, StageProfiler::OverlayBuild);
-		cv::Mat frame;
-		cv::cvtColor(imageBGRA, frame, cv::COLOR_BGRA2BGR);
+		// The overlay is drawn on a transparent layer of the source size; the frame
+		// itself is not needed here (and is empty on the zero-copy path).
+		const cv::Size frameSize((int)sourceWidth, (int)sourceHeight);
+		cv::Mat overlay = cv::Mat::zeros(frameSize, CV_8UC4);
 
 		if (tf->preview && tf->crop_enabled) {
 			// draw the crop rectangle on the frame in a dashed line
-			drawDashedRectangle(frame, cropRect, cv::Scalar(0, 255, 0), 5, 8, 15);
+			drawDashedRectangle(overlay, cropRect, cv::Scalar(0, 255, 0, 255), 5, 8, 15);
 		}
 		if (tf->preview && all_objects.size() > 0) {
 			if (tf->enableFaceExclusion && tf->minFaceAreaRatio > 0.0f) {
-				float screenArea = (float)(imageBGRA.cols * imageBGRA.rows);
+				float screenArea = (float)(sourceWidth * sourceHeight);
 				float minPersonAreaPixels = screenArea * (tf->minFaceAreaRatio / 100.0f);
 				for (Object &obj : all_objects) {
 					if (tf->personCategory != -1 && obj.label != tf->personCategory) continue;
@@ -1771,8 +1818,6 @@ static void run_model_inference(struct detect_filter *tf, InferenceJob job)
 			}
 		}
 		
-		cv::Mat overlay = cv::Mat::zeros(frame.size(), CV_8UC4);
-
 		if (tf->preview) {
 			draw_objects(overlay, all_objects, classNames);
 		}
@@ -1824,10 +1869,10 @@ static void run_model_inference(struct detect_filter *tf, InferenceJob job)
 			int panelWidth = 300;
 			int panelHeight = 200;
 			int padding = 20;
-			int startX = frame.cols - panelWidth - padding;
+			int startX = frameSize.width - panelWidth - padding;
 			int startY = padding;
 			
-			cv::Mat stats_overlay = cv::Mat::zeros(frame.size(), CV_8UC4);
+			cv::Mat stats_overlay = cv::Mat::zeros(frameSize, CV_8UC4);
 			cv::rectangle(stats_overlay, cv::Rect(startX, startY, panelWidth, panelHeight), cv::Scalar(0, 0, 0, 180), -1);
 			cv::addWeighted(overlay, 1.0, stats_overlay, 1.0, 0, overlay);
 			
@@ -1872,13 +1917,20 @@ static void run_model_inference(struct detect_filter *tf, InferenceJob job)
 		overlayStage.stop();
 		ScopedStage storeStage(profiler, StageProfiler::PreviewHistoryStore);
 		std::lock_guard<std::mutex> lock(tf->outputLock);
-		tf->previewHistory[inferenceFrameId] = overlay.clone();
-		// Clean up old preview frames
-		while (!tf->previewHistory.empty() &&
-		       tf->previewHistory.begin()->first <
-			       (inferenceFrameId > 120 ? inferenceFrameId - 120 : 0)) {
+		tf->previewHistory[inferenceFrameId] = std::move(overlay);
+		// The delayed render looks up the newest overlay at or before its frame, which is
+		// at most the current delay behind. Older overlays are dropped, except the newest
+		// one before that window so a lookup always finds a match.
+		const uint64_t keepFrames = (uint64_t)std::max(1, tf->previewHistoryKeepFrames.load());
+		const uint64_t threshold = inferenceFrameId > keepFrames ? inferenceFrameId - keepFrames : 0;
+		while (tf->previewHistory.size() > 1 &&
+		       std::next(tf->previewHistory.begin())->first <= threshold) {
 			tf->previewHistory.erase(tf->previewHistory.begin());
 		}
+	} else {
+		std::lock_guard<std::mutex> lock(tf->outputLock);
+		// Without an overlay the render would keep showing (and copying) a stale one.
+		tf->previewHistory.clear();
 	}
 
 	auto end_time = std::chrono::high_resolution_clock::now();
@@ -2040,14 +2092,21 @@ void detect_filter_destroy(void *data)
 		tf->delayedTextures.clear();
 		for (auto tex : tf->texturePool) gs_texture_destroy(tex);
 		tf->texturePool.clear();
-		if (tf->stagesurface) {
-			gs_stagesurface_destroy(tf->stagesurface);
+		for (gs_stagesurf_t *&surface : tf->stageSurfaces) {
+			if (surface)
+				gs_stagesurface_destroy(surface);
+			surface = nullptr;
+		}
+		for (gs_texrender_t *&blurTexrender : tf->blurTexrenders) {
+			if (blurTexrender)
+				gs_texrender_destroy(blurTexrender);
+			blurTexrender = nullptr;
+		}
+		if (tf->pixelateTexrender) {
+			gs_texrender_destroy(tf->pixelateTexrender);
 		}
 		if (tf->previewTexture) {
 			gs_texture_destroy(tf->previewTexture);
-		}
-		if (tf->baseTexture) {
-			gs_texture_destroy(tf->baseTexture);
 		}
 		gs_effect_destroy(tf->kawaseBlurEffect);
 		gs_effect_destroy(tf->maskingEffect);
@@ -2363,50 +2422,32 @@ void detect_filter_video_tick(void *data, float seconds)
 					      get_inference_frame_requirements(tf));
 #endif
 
-	cv::Mat imageBGRA;
-	uint64_t ownedFrameId = 0;
-	int frameWidth = 0;
-	int frameHeight = 0;
 	if (!use_gpu_zero_copy) {
-		std::unique_lock<std::mutex> lock(tf->inputBGRALock, std::try_to_lock);
-		if (!lock.owns_lock() || tf->inputBGRA.empty()) {
-			return;
-		}
-		{
-			ScopedStage cloneStage(profiler, StageProfiler::TickClone);
-			imageBGRA = tf->inputBGRA.clone();
-		}
-		ownedFrameId = tf->inputBGRAFrameId;
-		frameWidth = imageBGRA.cols;
-		frameHeight = imageBGRA.rows;
-	}
-
-	if (!use_gpu_zero_copy) {
-		std::unique_lock<std::mutex> lock(tf->inferenceMutex, std::try_to_lock);
-		if (lock.owns_lock() && !tf->isInferencing && !tf->inferenceFrameReady &&
-		    ownedFrameId > tf->lastQueuedInferenceFrameId) {
-			tf->inferenceJob.mode = InferenceMode::OwnedBGRA;
-			tf->inferenceJob.ownedBGRA = std::move(imageBGRA);
-			tf->inferenceJob.sourceWidth = (uint32_t)tf->inferenceJob.ownedBGRA.cols;
-			tf->inferenceJob.sourceHeight = (uint32_t)tf->inferenceJob.ownedBGRA.rows;
-			tf->inferenceJob.frameId = ownedFrameId;
-			tf->lastQueuedInferenceFrameId = ownedFrameId;
-			tf->isInferencing = true;
-			tf->inferenceFrameReady = true;
-			tf->inferenceCV.notify_one();
+		// The render thread writes a new Mat for every readback, so the frame can be
+		// handed to inference without a copy.
+		std::unique_lock<std::mutex> inferenceLock(tf->inferenceMutex, std::try_to_lock);
+		if (inferenceLock.owns_lock() && !tf->isInferencing && !tf->inferenceFrameReady) {
+			std::unique_lock<std::mutex> inputLock(tf->inputBGRALock, std::try_to_lock);
+			if (inputLock.owns_lock() && !tf->inputBGRA.empty() &&
+			    tf->inputBGRAFrameId > tf->lastQueuedInferenceFrameId) {
+				tf->inferenceJob.mode = InferenceMode::OwnedBGRA;
+				tf->inferenceJob.ownedBGRA = std::move(tf->inputBGRA);
+				tf->inputBGRA = cv::Mat();
+				tf->inferenceJob.sourceWidth = (uint32_t)tf->inferenceJob.ownedBGRA.cols;
+				tf->inferenceJob.sourceHeight = (uint32_t)tf->inferenceJob.ownedBGRA.rows;
+				tf->inferenceJob.frameId = tf->inputBGRAFrameId;
+				tf->lastQueuedInferenceFrameId = tf->inputBGRAFrameId;
+				tf->inferenceStartNs = steady_now_ns();
+				tf->isInferencing = true;
+				tf->inferenceFrameReady = true;
+				tf->inferenceCV.notify_one();
+			}
 		}
 	}
 
 	if (tf->trackingEnabled && tf->trackingFilter) {
-		int width = 0;
-		int height = 0;
-		if (frameWidth > 0 && frameHeight > 0) {
-			width = frameWidth;
-			height = frameHeight;
-		} else {
-			width = tf->lastTexWidth;
-			height = tf->lastTexHeight;
-		}
+		const int width = (int)tf->lastTexWidth;
+		const int height = (int)tf->lastTexHeight;
 		if (width <= 0 || height <= 0) return;
 
 		std::vector<Object> objects;
@@ -2521,19 +2562,15 @@ static cv::Rect2f scaleBoundingBox(const cv::Rect2f& rect, float scale) {
 
 // Final render box for objects (confirmed/extrapolated/missing)
 static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R,
-				    const StateHistoryManager *historyManager,
+				    const std::deque<FrameStateHistory> &buffer,
 				    uint64_t current_realtime_T, int preemptiveMaskingFrames,
 				    std::string &out_mode, uint64_t *out_identity_epoch = nullptr)
 {
 	if (out_identity_epoch)
 		*out_identity_epoch = 0;
-	if (!historyManager) {
-		out_mode = "None";
-		return cv::Rect2f(0, 0, 0, 0);
-	}
-	
+
 	TrackedObjectState current_state;
-	bool exists_now = historyManager->get_object_state(R, object_id, current_state);
+	bool exists_now = StateHistoryManager::find_object_state(buffer, R, object_id, current_state);
 
 	// 1. Object exists in current frame and is confirmed (not extrapolated)
 	if (exists_now && current_state.is_confirmed && !current_state.is_extrapolated) {
@@ -2548,7 +2585,6 @@ static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R,
 	bool will_be_recovered = false;
 	uint64_t first_active_future_frame = 0;
 
-	const auto buffer = historyManager->get_buffer_copy();
 	for (auto it = buffer.rbegin(); it != buffer.rend(); ++it) {
 		if (it->frame_id > R && it->frame_id <= current_realtime_T) {
 			auto obj_it = it->objects.find(object_id);
@@ -2568,7 +2604,7 @@ static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R,
 	// 3. Apply reverse masking for the earliest future frame (confirmed, within preemptive masking range, not confirmed in current frame)
 	if (will_be_confirmed && (first_active_future_frame > R) && (first_active_future_frame - R <= (uint64_t)preemptiveMaskingFrames) && (!exists_now || !current_state.is_confirmed)) {
 		TrackedObjectState future_active_state;
-		if (historyManager->get_object_state(first_active_future_frame, object_id, future_active_state)) {
+		if (StateHistoryManager::find_object_state(buffer, first_active_future_frame, object_id, future_active_state)) {
 			out_mode = "Reverse Masking";
 			if (out_identity_epoch)
 				*out_identity_epoch = future_active_state.identityEpoch;
@@ -2647,7 +2683,7 @@ static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R,
 		}
 
 		TrackedObjectState right_state;
-		if (found_left && historyManager->get_object_state(first_active_future_frame, object_id, right_state)) {
+		if (found_left && StateHistoryManager::find_object_state(buffer, first_active_future_frame, object_id, right_state)) {
 			if (out_identity_epoch)
 				*out_identity_epoch = right_state.identityEpoch;
 			float total_dist = static_cast<float>(first_active_future_frame - last_active_frame);
@@ -2787,28 +2823,16 @@ static void draw_masked_output(struct detect_filter *tf, gs_texture_t *sourceTex
 	applyMaskTexture(tf->maskingEffect);
 	applyMaskTexture(tf->pixelateEffect);
 
-	// Preserve the original frame for blending
-	if (!tf->baseTexture || gs_texture_get_width(tf->baseTexture) != width ||
-	    gs_texture_get_height(tf->baseTexture) != height) {
-		if (tf->baseTexture)
-			gs_texture_destroy(tf->baseTexture);
-		tf->baseTexture = gs_texture_create(width, height, GS_BGRA, 1, nullptr, 0);
-	}
-	gs_copy_texture(tf->baseTexture, sourceTex);
-
 	gs_texture_t *tex = sourceTex;
-	bool destroy_tex = false;
 	const char *technique_name = "Draw";
 	gs_eparam_t *maskColorParam = gs_effect_get_param_by_name(tf->maskingEffect, "color");
 	if (tf->maskingType == "output_mask") {
 		technique_name = "DrawMask";
 	} else if (tf->maskingType == "blur") {
 		tex = blur_image(tf, width, height, sourceTex);
-		destroy_tex = true; // blur_image creates a new texture
 	} else if (tf->maskingType == "pixelate") {
 		tex = pixelate_image(tf, width, height, maskTexture, (float)tf->maskingBlurRadius,
 				     sourceTex);
-		destroy_tex = true;
 	} else if (tf->maskingType == "transparent") {
 		technique_name = "DrawSolidColor";
 		gs_effect_set_color(maskColorParam, 0);
@@ -2817,19 +2841,31 @@ static void draw_masked_output(struct detect_filter *tf, gs_texture_t *sourceTex
 		gs_effect_set_color(maskColorParam, tf->maskingColor);
 	}
 
+	if (!tex)
+		tex = sourceTex;
+
 	gs_eparam_t *baseImageParam = gs_effect_get_param_by_name(tf->maskingEffect, "base_image");
 	if (baseImageParam)
-		gs_effect_set_texture(baseImageParam, tf->baseTexture);
+		gs_effect_set_texture(baseImageParam, sourceTex);
 	gs_eparam_t *imageParam = gs_effect_get_param_by_name(tf->maskingEffect, "image");
 	gs_effect_set_texture(imageParam, tex);
 
 	while (gs_effect_loop(tf->maskingEffect, technique_name)) {
 		gs_draw_sprite(tex, 0, 0, 0);
 	}
+}
 
-	if (destroy_tex) {
-		gs_texture_destroy(tex);
-	}
+// True when a frame read back now would be taken by inference at the next tick: it is
+// idle, or the running inference is expected to finish within one frame.
+static bool inference_can_take_frame_soon(const detect_filter *tf, double fps)
+{
+	if (!tf->isInferencing)
+		return true;
+	const double averageMs = tf->inferenceAvgMs;
+	if (averageMs <= 0.0 || fps <= 0.0)
+		return true;
+	const double elapsedMs = (double)(steady_now_ns() - tf->inferenceStartNs) / 1e6;
+	return elapsedMs + 1000.0 / fps >= averageMs;
 }
 
 void detect_filter_video_render(void *data, gs_effect_t *_effect)
@@ -2881,6 +2917,9 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 		}
 		return;
 	}
+	// The tick uses the frame size for the zoom-follow crop.
+	tf->lastTexWidth = width;
+	tf->lastTexHeight = height;
 
 	ScopedStage captureStage(profiler, StageProfiler::RenderCapture);
 	gs_texrender_reset(tf->texrender);
@@ -2919,6 +2958,7 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 	uint64_t renderFrameId = 0;
 	uint64_t maskRenderFrameId = 0;
 	int totalDelay = tf->videoDelayFrames + tf->lookaheadDelayFrames;
+	tf->previewHistoryKeepFrames = totalDelay + 5;
 
 	if (!tf->tickRendered) {
 		tf->tickRendered = true;
@@ -2971,6 +3011,7 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 						tf->inferenceJob.frameId = tf->currentFrameId + 1;
 						tf->lastQueuedInferenceFrameId =
 							tf->inferenceJob.frameId;
+						tf->inferenceStartNs = steady_now_ns();
 						tf->isInferencing = true;
 						tf->inferenceFrameReady = true;
 						tf->inferenceCV.notify_one();
@@ -2981,46 +3022,51 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 #endif
 
 		if (!run_gpu) {
-			if (tf->stagesurface) {
-				uint32_t stagesurf_width = gs_stagesurface_get_width(tf->stagesurface);
-				uint32_t stagesurf_height = gs_stagesurface_get_height(tf->stagesurface);
-				if (stagesurf_width != width || stagesurf_height != height) {
-					gs_stagesurface_destroy(tf->stagesurface);
-					tf->stagesurface = nullptr;
+			// The frame staged on the previous render can be mapped now without waiting
+			// for the GPU. It is copied only if inference can take it by the next tick.
+			if (tf->stagePending) {
+				tf->stagePending = false;
+				gs_stagesurf_t *staged = tf->stageSurfaces[tf->stageWriteIndex ^ 1];
+				if (staged && gs_stagesurface_get_width(staged) == width &&
+				    gs_stagesurface_get_height(staged) == height &&
+				    inference_can_take_frame_soon(tf, fps)) {
+					ScopedStage readbackStage(profiler, StageProfiler::StageReadback);
+					uint8_t *video_data = nullptr;
+					uint32_t linesize = 0;
+					const bool mapped =
+						gs_stagesurface_map(staged, &video_data, &linesize);
+					readbackStage.stop();
+					if (mapped) {
+						ScopedStage copyStage(profiler, StageProfiler::CopyMapped);
+						cv::Mat ownedFrame =
+							copyMappedBGRA(video_data, linesize, width, height);
+						copyStage.stop();
+						gs_stagesurface_unmap(staged);
+						if (!ownedFrame.empty()) {
+							std::lock_guard<std::mutex> lock(tf->inputBGRALock);
+							tf->inputBGRA = std::move(ownedFrame);
+							tf->inputBGRAFrameId = tf->stagedFrameId;
+						}
+					}
 				}
 			}
-			if (!tf->stagesurface) {
-				tf->stagesurface = gs_stagesurface_create(width, height, GS_BGRA);
+
+			gs_stagesurf_t *&stageTarget = tf->stageSurfaces[tf->stageWriteIndex];
+			if (stageTarget && (gs_stagesurface_get_width(stageTarget) != width ||
+					    gs_stagesurface_get_height(stageTarget) != height)) {
+				gs_stagesurface_destroy(stageTarget);
+				stageTarget = nullptr;
 			}
-			ScopedStage readbackStage(profiler, StageProfiler::StageReadback);
-			gs_stage_texture(tf->stagesurface, render_tex);
-			uint8_t *video_data;
-			uint32_t linesize;
-			const bool mapped =
-				gs_stagesurface_map(tf->stagesurface, &video_data, &linesize);
-			readbackStage.stop();
-			if (mapped) {
-				ScopedStage copyStage(profiler, StageProfiler::CopyMapped);
-				cv::Mat ownedFrame =
-					copyMappedBGRA(video_data, linesize, width, height);
-				copyStage.stop();
-				gs_stagesurface_unmap(tf->stagesurface);
-				if (ownedFrame.empty()) {
-					if (tf->source)
-						obs_source_skip_video_filter(tf->source);
-					return;
-				}
-				{
-					std::lock_guard<std::mutex> lock(tf->inputBGRALock);
-					tf->inputBGRA = std::move(ownedFrame);
-					tf->inputBGRAFrameId = tf->currentFrameId + 1;
-				}
-			} else {
-				if (tf->source) {
-					obs_source_skip_video_filter(tf->source);
-				}
-				return;
+			if (!stageTarget)
+				stageTarget = gs_stagesurface_create(width, height, GS_BGRA);
+			if (stageTarget) {
+				gs_stage_texture(stageTarget, render_tex);
+				tf->stagedFrameId = tf->currentFrameId + 1;
+				tf->stagePending = true;
+				tf->stageWriteIndex ^= 1;
 			}
+		} else {
+			tf->stagePending = false;
 		}
 
 		// ---- VIDEO DELAY LOGIC ----
@@ -3084,117 +3130,77 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 	}
 
 	// if preview, masking, debug stats, or debug mode is enabled, render the image
-	if (tf->preview || tf->maskingEnabled || tf->debugMode || tf->enableFaceStats) {
-		cv::Mat outputBGRA;
-		cv::Mat localOutputBGRA;
-		bool skip_preview = false;
-		{
-			// lock the outputLock mutex
-			std::lock_guard<std::mutex> lock(tf->outputLock);
-			if (tf->previewHistory.empty()) {
-				skip_preview = true;
-			} else {
-				auto it = tf->previewHistory.upper_bound(maskRenderFrameId);
-				if (it != tf->previewHistory.begin()) {
-					--it; // Closest available frame <= maskRenderFrameId
-					localOutputBGRA = it->second;
-				} else {
-					localOutputBGRA = tf->previewHistory.begin()->second;
-				}
-				
-				if ((uint32_t)localOutputBGRA.cols != width ||
-				    (uint32_t)localOutputBGRA.rows != height) {
-					skip_preview = true;
-				}
-			}
-		}
-		double previewMs = 0.0;
-		if (!skip_preview) {
-			const auto previewStart = std::chrono::steady_clock::now();
-			outputBGRA = localOutputBGRA.clone();
-			previewMs += std::chrono::duration<double, std::milli>(
-					     std::chrono::steady_clock::now() - previewStart)
-					     .count();
-
-			// Mask status display ([Confirmed] / [Reverse Masking] etc.) - Depends on preview option
-			if (tf->preview && tf->stateHistory) {
-				std::set<int> active_ids = tf->stateHistory->get_all_active_ids(maskRenderFrameId, tf->currentFrameId);
-				for (int id : active_ids) {
-					std::string mode_str;
-					cv::Rect2f rect = getFinalRenderBox(id, maskRenderFrameId, tf->stateHistory.get(), tf->currentFrameId, tf->preemptiveMaskingFrames, mode_str);
-					if (rect.width > 0 && rect.height > 0) {
-						std::string text = "[" + mode_str + "]";
-						cv::Scalar color(0, 255, 255, 255); // Yellow
-						if (mode_str == "Confirmed") color = cv::Scalar(0, 255, 0, 255); // Green
-						else if (mode_str == "Interpolated") color = cv::Scalar(255, 165, 0, 255); // Orange
-						else if (mode_str == "Reverse Masking") color = cv::Scalar(255, 0, 255, 255); // Magenta
-						else if (mode_str == "Extrapolated") color = cv::Scalar(0, 0, 255, 255); // Red
-						
-						int baseline = 0;
-						cv::Size textSize = cv::getTextSize(text, cv::FONT_HERSHEY_SIMPLEX, 0.5, 2, &baseline);
-						cv::Point textOrg((int)rect.x, (int)rect.y - 10);
-						if (textOrg.y < textSize.height) textOrg.y = (int)(rect.y + rect.height) + textSize.height + 10;
-						
-						// Draw text outline for visibility
-						cv::putText(outputBGRA, text, textOrg, cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0, 255), 4, cv::LINE_AA);
-						cv::putText(outputBGRA, text, textOrg, cv::FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv::LINE_AA);
-					}
+	const bool overlayWanted = tf->preview || tf->debugMode || tf->enableFaceStats ||
+				   tf->showYuNetDetections;
+	if (overlayWanted || tf->maskingEnabled) {
+		// One snapshot of the state history serves the mask and the preview labels.
+		struct RenderBox {
+			int id = 0;
+			cv::Rect2f rect;
+			std::string mode;
+			uint64_t identityEpoch = 0;
+		};
+		std::vector<RenderBox> renderBoxes;
+		bool boxCollectionFailed = false;
+		try {
+			if (tf->stateHistory) {
+				const std::deque<FrameStateHistory> history =
+					tf->stateHistory->get_buffer_copy();
+				const std::set<int> activeIds = StateHistoryManager::collect_active_ids(
+					history, maskRenderFrameId, tf->currentFrameId);
+				renderBoxes.reserve(activeIds.size());
+				for (int id : activeIds) {
+					RenderBox box;
+					box.id = id;
+					box.rect = getFinalRenderBox(id, maskRenderFrameId, history,
+								     tf->currentFrameId,
+								     tf->preemptiveMaskingFrames, box.mode,
+								     &box.identityEpoch);
+					renderBoxes.push_back(std::move(box));
 				}
 			}
+		} catch (const std::bad_alloc &) {
+			boxCollectionFailed = true;
 		}
-
-		gs_texture_t *tex = delayed_tex;
 
 		if (tf->maskingEnabled) {
 			std::vector<MaskRect> maskRects;
 			int current_excluded_count = 0;
-			bool maskCollectionFailed = false;
+			bool maskCollectionFailed = boxCollectionFailed;
+			if (maskCollectionFailed) {
+				tf->maskForceFullscreen = true;
+				log_mask_failure(tf, "rectangle allocation");
+			}
 			auto faceSnapshot = tf->faceState.snapshot();
 			try {
-				if (tf->stateHistory) {
-					std::set<int> active_ids =
-						tf->stateHistory->get_all_active_ids(
-							maskRenderFrameId, tf->currentFrameId);
-					maskRects.reserve(active_ids.size());
-					for (int id : active_ids) {
-						std::string mode_str;
-						uint64_t identityEpoch = 0;
-						cv::Rect2f rect = getFinalRenderBox(
-							id, maskRenderFrameId,
-							tf->stateHistory.get(), tf->currentFrameId,
-							tf->preemptiveMaskingFrames, mode_str,
-							&identityEpoch);
-						if (rect.width <= 0 || rect.height <= 0 ||
-						    mode_str == "Ghost")
-							continue;
+				maskRects.reserve(renderBoxes.size());
+				for (const RenderBox &box : renderBoxes) {
+					cv::Rect2f rect = box.rect;
+					if (rect.width <= 0 || rect.height <= 0 || box.mode == "Ghost")
+						continue;
 
-						if (tf->enableFaceExclusion && faceSnapshot &&
-						    FaceStateStore::isExempt(
-							    *faceSnapshot, (uint64_t)id,
-							    identityEpoch,
-							    tf->preserveFaceExclusionOnRecovery)) {
-							current_excluded_count++;
-							continue;
-						}
-
-						float expansion = 0.0f;
-						if (tf->maskingDynamicExpansion) {
-							expansion =
-								tf->maskingDynamicExpansionBase +
-								(rect.height *
-								 tf->maskingDynamicExpansionRatio);
-						} else if (tf->maskingDilateIterations > 0) {
-							expansion = (float)tf->maskingDilateIterations;
-						}
-						if (expansion > 0.0f) {
-							rect.x -= expansion;
-							rect.y -= expansion;
-							rect.width += expansion * 2.0f;
-							rect.height += expansion * 2.0f;
-						}
-						maskRects.push_back(
-							{rect.x, rect.y, rect.width, rect.height});
+					if (tf->enableFaceExclusion && faceSnapshot &&
+					    FaceStateStore::isExempt(*faceSnapshot, (uint64_t)box.id,
+								     box.identityEpoch,
+								     tf->preserveFaceExclusionOnRecovery)) {
+						current_excluded_count++;
+						continue;
 					}
+
+					float expansion = 0.0f;
+					if (tf->maskingDynamicExpansion) {
+						expansion = tf->maskingDynamicExpansionBase +
+							    (rect.height * tf->maskingDynamicExpansionRatio);
+					} else if (tf->maskingDilateIterations > 0) {
+						expansion = (float)tf->maskingDilateIterations;
+					}
+					if (expansion > 0.0f) {
+						rect.x -= expansion;
+						rect.y -= expansion;
+						rect.width += expansion * 2.0f;
+						rect.height += expansion * 2.0f;
+					}
+					maskRects.push_back({rect.x, rect.y, rect.width, rect.height});
 				}
 			} catch (const std::bad_alloc &) {
 				maskCollectionFailed = true;
@@ -3234,41 +3240,115 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 		} else {
 			gs_effect_t *default_effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
 			gs_eparam_t *defaultImageParam = gs_effect_get_param_by_name(default_effect, "image");
-			if (defaultImageParam) gs_effect_set_texture(defaultImageParam, tex);
+			if (defaultImageParam) gs_effect_set_texture(defaultImageParam, delayed_tex);
 			while (gs_effect_loop(default_effect, "Draw")) {
-				gs_draw_sprite(tex, 0, 0, 0);
+				gs_draw_sprite(delayed_tex, 0, 0, 0);
 			}
 		}
-		
-		if (!skip_preview && (tf->preview || tf->debugMode || tf->enableFaceStats)) {
-			const auto uploadStart = std::chrono::steady_clock::now();
-			if (!tf->previewTexture || gs_texture_get_width(tf->previewTexture) != width || gs_texture_get_height(tf->previewTexture) != height) {
-				if (tf->previewTexture) gs_texture_destroy(tf->previewTexture);
-				tf->previewTexture = gs_texture_create(width, height, GS_BGRA, 1,
-							      (const uint8_t **)&outputBGRA.data, GS_DYNAMIC);
-			} else {
-				gs_texture_set_image(tf->previewTexture, outputBGRA.data, width * 4, false);
-			}
-			previewMs += std::chrono::duration<double, std::milli>(
-					     std::chrono::steady_clock::now() - uploadStart)
-					     .count();
-			
-			gs_blend_state_push();
-			gs_enable_blending(true);
-			gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
-			gs_effect_t *default_effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
-			gs_eparam_t *defaultImageParam = gs_effect_get_param_by_name(default_effect, "image");
-			gs_effect_set_texture(defaultImageParam, tf->previewTexture);
-			while (gs_effect_loop(default_effect, "Draw")) {
-				gs_draw_sprite(tf->previewTexture, 0, 0, 0);
-			}
-			gs_blend_state_pop();
-		}
-		if (profiler && previewMs > 0.0)
-			profiler->add(StageProfiler::PreviewUpload, previewMs);
 
-		tf->lastTexWidth = width;
-		tf->lastTexHeight = height;
+		if (overlayWanted) {
+			const auto previewStart = std::chrono::steady_clock::now();
+			cv::Mat overlay;
+			uint64_t overlayFrameId = 0;
+			{
+				std::lock_guard<std::mutex> lock(tf->outputLock);
+				if (!tf->previewHistory.empty()) {
+					auto it = tf->previewHistory.upper_bound(maskRenderFrameId);
+					if (it != tf->previewHistory.begin())
+						--it; // Closest available frame <= maskRenderFrameId
+					overlayFrameId = it->first;
+					// Shared with the history; entries are never written after insertion.
+					overlay = it->second;
+				}
+			}
+			if (!overlay.empty() && (uint32_t)overlay.cols == width &&
+			    (uint32_t)overlay.rows == height) {
+				// Mask status display ([Confirmed] / [Reverse Masking] etc.)
+				std::vector<PreviewLabel> labels;
+				if (tf->preview) {
+					for (const RenderBox &box : renderBoxes) {
+						const cv::Rect2f &rect = box.rect;
+						if (rect.width <= 0 || rect.height <= 0)
+							continue;
+						PreviewLabel label;
+						label.text = "[" + box.mode + "]";
+						label.color = cv::Scalar(0, 255, 255, 255); // Yellow
+						if (box.mode == "Confirmed")
+							label.color = cv::Scalar(0, 255, 0, 255); // Green
+						else if (box.mode == "Interpolated")
+							label.color = cv::Scalar(255, 165, 0, 255); // Orange
+						else if (box.mode == "Reverse Masking")
+							label.color = cv::Scalar(255, 0, 255, 255); // Magenta
+						else if (box.mode == "Extrapolated")
+							label.color = cv::Scalar(0, 0, 255, 255); // Red
+
+						int baseline = 0;
+						cv::Size textSize = cv::getTextSize(label.text,
+										    cv::FONT_HERSHEY_SIMPLEX,
+										    0.5, 2, &baseline);
+						label.origin = cv::Point((int)rect.x, (int)rect.y - 10);
+						if (label.origin.y < textSize.height)
+							label.origin.y = (int)(rect.y + rect.height) +
+									 textSize.height + 10;
+						labels.push_back(std::move(label));
+					}
+				}
+
+				// The overlay only changes when inference publishes a new frame or a
+				// label moves, so most frames reuse the uploaded texture.
+				const bool textureMatches = tf->previewTexture &&
+							    gs_texture_get_width(tf->previewTexture) == width &&
+							    gs_texture_get_height(tf->previewTexture) == height;
+				if (!textureMatches || overlayFrameId != tf->previewOverlayFrameId ||
+				    labels != tf->previewLabels) {
+					const cv::Mat *upload = &overlay;
+					if (!labels.empty()) {
+						overlay.copyTo(tf->previewComposite);
+						for (const PreviewLabel &label : labels) {
+							// Draw text outline for visibility
+							cv::putText(tf->previewComposite, label.text,
+								    label.origin, cv::FONT_HERSHEY_SIMPLEX, 0.5,
+								    cv::Scalar(0, 0, 0, 255), 4, cv::LINE_AA);
+							cv::putText(tf->previewComposite, label.text,
+								    label.origin, cv::FONT_HERSHEY_SIMPLEX, 0.5,
+								    label.color, 1, cv::LINE_AA);
+						}
+						upload = &tf->previewComposite;
+					}
+					if (!textureMatches) {
+						if (tf->previewTexture)
+							gs_texture_destroy(tf->previewTexture);
+						const uint8_t *data = upload->data;
+						tf->previewTexture = gs_texture_create(
+							width, height, GS_BGRA, 1, &data, GS_DYNAMIC);
+					} else {
+						gs_texture_set_image(tf->previewTexture, upload->data,
+								     (uint32_t)upload->step, false);
+					}
+					tf->previewOverlayFrameId = overlayFrameId;
+					tf->previewLabels = std::move(labels);
+				}
+				if (profiler)
+					profiler->add(StageProfiler::PreviewUpload,
+						      std::chrono::duration<double, std::milli>(
+							      std::chrono::steady_clock::now() - previewStart)
+							      .count());
+
+				if (tf->previewTexture) {
+					gs_blend_state_push();
+					gs_enable_blending(true);
+					gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
+					gs_effect_t *default_effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+					gs_eparam_t *defaultImageParam =
+						gs_effect_get_param_by_name(default_effect, "image");
+					gs_effect_set_texture(defaultImageParam, tf->previewTexture);
+					while (gs_effect_loop(default_effect, "Draw")) {
+						gs_draw_sprite(tf->previewTexture, 0, 0, 0);
+					}
+					gs_blend_state_pop();
+				}
+			}
+		}
 	} else if (totalDelay > 0) {
 		gs_texture_t *tex = delayed_tex;
 		gs_effect_t *default_effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
