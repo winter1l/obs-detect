@@ -2667,8 +2667,16 @@ static cv::Rect2f getFinalRenderBox(int object_id, uint64_t R,
 				extrapolated_rect.y = future_active_state.rect.y - (dy * time_diff);
 				extrapolated_rect.width = future_active_state.rect.width - (dw * time_diff);
 				extrapolated_rect.height = future_active_state.rect.height - (dh * time_diff);
-				
-				return scaleBoundingBox(extrapolated_rect, 1.2f);
+
+				// Extrapolating backwards can shrink the box to nothing (for example when
+				// it grows between the first two detections), which would leave the
+				// lead-in unmasked, so the box where the object will appear is always
+				// covered too.
+				cv::Rect2f covered = future_active_state.rect;
+				if (isDrawableMaskRect({extrapolated_rect.x, extrapolated_rect.y,
+							extrapolated_rect.width, extrapolated_rect.height}))
+					covered |= extrapolated_rect;
+				return scaleBoundingBox(covered, 1.2f);
 			} else {
 				// If no next future frame is found, use the current confirmed state
 				return scaleBoundingBox(future_active_state.rect, 1.2f);
@@ -2831,7 +2839,9 @@ static void draw_masked_output(struct detect_filter *tf, gs_texture_t *sourceTex
 			return;
 		gs_eparam_t *textureParam = gs_effect_get_param_by_name(effect, "mask_texture");
 		gs_eparam_t *forceParam = gs_effect_get_param_by_name(effect, "force_full_mask");
-		if (textureParam && maskTexture)
+		// Always rebind, even to null, so a texture from an earlier frame (possibly
+		// destroyed since) is never sampled.
+		if (textureParam)
 			gs_effect_set_texture(textureParam, maskTexture);
 		if (forceParam)
 			gs_effect_set_bool(forceParam, tf->maskForceFullscreen);
@@ -2857,8 +2867,14 @@ static void draw_masked_output(struct detect_filter *tf, gs_texture_t *sourceTex
 		gs_effect_set_color(maskColorParam, tf->maskingColor);
 	}
 
-	if (!tex)
+	if (!tex) {
+		// Blur or pixelation could not be rendered: cover the masked regions with opaque
+		// black rather than showing them unchanged.
+		log_mask_failure(tf, "masking effect");
+		technique_name = "DrawSolidColor";
+		gs_effect_set_color(maskColorParam, 0xFF000000);
 		tex = sourceTex;
+	}
 
 	gs_eparam_t *baseImageParam = gs_effect_get_param_by_name(tf->maskingEffect, "base_image");
 	if (baseImageParam)
@@ -2933,6 +2949,11 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 		}
 		return;
 	}
+	// After the source changes size, delayed frames, history boxes and the mask still use
+	// the old size, so people would be masked in the wrong place for up to the look-ahead.
+	// Dropping everything restarts masking fail-closed (full frame until detections).
+	if (tf->lastTexWidth != 0 && (tf->lastTexWidth != width || tf->lastTexHeight != height))
+		clear_all_buffers(tf, true);
 	// The tick uses the frame size for the zoom-follow crop.
 	tf->lastTexWidth = width;
 	tf->lastTexHeight = height;
@@ -3196,7 +3217,17 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 				maskRects.reserve(renderBoxes.size());
 				for (const RenderBox &box : renderBoxes) {
 					cv::Rect2f rect = box.rect;
-					if (rect.width <= 0 || rect.height <= 0 || box.mode == "Ghost")
+					if (box.mode == "Ghost")
+						continue;
+					if (!std::isfinite(rect.x) || !std::isfinite(rect.y) ||
+					    !std::isfinite(rect.width) || !std::isfinite(rect.height)) {
+						// Where this object is is unknown, so mask everything.
+						maskCollectionFailed = true;
+						tf->maskForceFullscreen = true;
+						log_mask_failure(tf, "invalid box");
+						continue;
+					}
+					if (rect.width <= 0 || rect.height <= 0)
 						continue;
 
 					if (tf->enableFaceExclusion && faceSnapshot &&
