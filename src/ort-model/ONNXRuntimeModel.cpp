@@ -139,34 +139,31 @@ ONNXRuntimeModel::ONNXRuntimeModel(file_name_t path_to_model, int intra_op_num_t
 	}
 }
 
-cv::Mat ONNXRuntimeModel::static_resize(const cv::Mat &img, const int input_index)
+void ONNXRuntimeModel::letterboxToBlob(const cv::Mat &img, const int input_index,
+				       float *blob_data, bool swapRB, float scale)
 {
-	float r = std::fminf((float)input_w_[input_index] / (float)img.cols,
-			     (float)input_h_[input_index] / (float)img.rows);
-	// r = std::min(r, 1.0f);
-	int unpad_w = (int)(r * (float)img.cols);
-	int unpad_h = (int)(r * (float)img.rows);
-	cv::Mat re(unpad_h, unpad_w, CV_8UC3);
-	cv::resize(img, re, re.size());
-	cv::Mat out(input_h_[input_index], input_w_[input_index], CV_8UC3,
-		    cv::Scalar(114, 114, 114));
-	re.copyTo(out(cv::Rect(0, 0, re.cols, re.rows)));
-	return out;
-}
+	const int input_w = input_w_[input_index];
+	const int input_h = input_h_[input_index];
+	const float r = std::fminf((float)input_w / (float)img.cols, (float)input_h / (float)img.rows);
+	const int unpad_w = std::min(input_w, (int)(r * (float)img.cols));
+	const int unpad_h = std::min(input_h, (int)(r * (float)img.rows));
 
-// for NCHW
-void ONNXRuntimeModel::blobFromImage(const cv::Mat &img, float *blob_data)
-{
-	size_t channels = 3;
-	size_t img_h = img.rows;
-	size_t img_w = img.cols;
-	for (size_t c = 0; c < channels; ++c) {
-		for (size_t h = 0; h < img_h; ++h) {
-			for (size_t w = 0; w < img_w; ++w) {
-				blob_data[(int)(c * img_w * img_h + h * img_w + w)] =
-					(float)img.ptr<cv::Vec3b>((int)h)[(int)w][(int)c];
-			}
-		}
+	cv::Mat resized = img;
+	if (img.cols != unpad_w || img.rows != unpad_h)
+		cv::resize(img, resized, cv::Size(unpad_w, unpad_h));
+
+	// Each NCHW plane is wrapped in place: padding is filled first, then the resized
+	// image is converted straight into the top-left of the plane. Only the first three
+	// channels are used, so BGR and BGRA frames give the same blob.
+	cv::Mat channels[4];
+	cv::split(resized, channels);
+	const size_t planeSize = (size_t)input_w * (size_t)input_h;
+	for (int c = 0; c < 3; ++c) {
+		cv::Mat plane(input_h, input_w, CV_32F, blob_data + (size_t)c * planeSize);
+		plane.setTo(114.0f * scale);
+		const int source = swapRB ? 2 - c : c;
+		cv::Mat roi = plane(cv::Rect(0, 0, unpad_w, unpad_h));
+		channels[source].convertTo(roi, CV_32F, scale);
 	}
 }
 
@@ -260,10 +257,8 @@ void ONNXRuntimeModel::inference(const cv::Mat &frame, const int input_index)
 {
 	// preprocess
 	auto stageStart = std::chrono::steady_clock::now();
-	cv::Mat pr_img = this->static_resize(frame, input_index);
-
 	float *blob_data = (float *)(this->input_buffer_[input_index].get());
-	blobFromImage(pr_img, blob_data);
+	letterboxToBlob(frame, input_index, blob_data);
 	lastTimings_ = {};
 	lastTimings_.preprocessMs = elapsedMs(stageStart);
 	stageStart = std::chrono::steady_clock::now();

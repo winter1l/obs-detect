@@ -1248,8 +1248,12 @@ static void clear_all_buffers(struct detect_filter *tf, bool in_graphics_ctx)
 		if (!in_graphics_ctx) obs_leave_graphics();
 		cleared_any = true;
 	}
-	// A frame staged before the reset must not be read back afterwards.
+	// A frame staged or read back before the reset must not reach inference afterwards.
 	tf->stagePending = false;
+	{
+		std::lock_guard<std::mutex> lock(tf->inputBGRALock);
+		tf->inputBGRA = cv::Mat();
+	}
 
 	{
 		std::lock_guard<std::mutex> lock(tf->outputLock);
@@ -1456,7 +1460,7 @@ static void run_model_inference(struct detect_filter *tf, InferenceJob job)
 			cropRect = cv::Rect(tf->crop_left, tf->crop_top, cropWidth, cropHeight);
 		}
 		// Models that letterbox their input would shrink the frame anyway, so shrink it
-		// first and convert only the small frame. Detections are scaled back below.
+		// first. Detections are scaled back below.
 		float detectionScaleX = 1.0f;
 		float detectionScaleY = 1.0f;
 		try {
@@ -1476,7 +1480,11 @@ static void run_model_inference(struct detect_filter *tf, InferenceJob job)
 					source = scaled;
 				}
 			}
-			cv::cvtColor(source, inferenceFrame, cv::COLOR_BGRA2BGR);
+			// Letterboxing models read BGRA directly; others get a BGR frame.
+			if (inputSize.width > 0 && inputSize.height > 0)
+				inferenceFrame = source;
+			else
+				cv::cvtColor(source, inferenceFrame, cv::COLOR_BGRA2BGR);
 		} catch (const cv::Exception &e) {
 			obs_log(LOG_ERROR, "Inference frame preprocessing failed: %s", e.what());
 			return;
@@ -2132,24 +2140,55 @@ void detect_filter_destroy(void *data)
 	}
 }
 
+// Takes the newest read-back frame for inference. Called with inferenceMutex held.
+static bool take_owned_frame_locked(struct detect_filter *tf, InferenceJob &job)
+{
+	std::lock_guard<std::mutex> inputLock(tf->inputBGRALock);
+	if (tf->inputBGRA.empty() || tf->inputBGRAFrameId <= tf->lastQueuedInferenceFrameId)
+		return false;
+	// The render thread writes a new Mat for every readback, so the frame is moved,
+	// not copied.
+	job = InferenceJob{};
+	job.mode = InferenceMode::OwnedBGRA;
+	job.ownedBGRA = std::move(tf->inputBGRA);
+	tf->inputBGRA = cv::Mat();
+	job.sourceWidth = (uint32_t)job.ownedBGRA.cols;
+	job.sourceHeight = (uint32_t)job.ownedBGRA.rows;
+	job.frameId = tf->inputBGRAFrameId;
+	tf->lastQueuedInferenceFrameId = job.frameId;
+	return true;
+}
+
 static void inference_thread_loop(struct detect_filter *tf)
 {
 	obs_log(LOG_INFO, "Inference thread started");
 	while (!tf->stopInferenceThread) {
 		InferenceJob job;
+		bool haveJob = false;
 		{
 			std::unique_lock<std::mutex> lock(tf->inferenceMutex);
-			tf->inferenceCV.wait(lock, [tf] {
-				return tf->inferenceFrameReady || tf->stopInferenceThread;
-			});
-
-			if (tf->stopInferenceThread) {
-				break;
+			// A read-back frame is taken as soon as this thread is free instead of at
+			// the next video tick, so inference slower than one frame is not rounded
+			// up to two. The render thread signals new frames; the timeout covers a
+			// signal sent just before this thread started waiting.
+			while (!tf->stopInferenceThread) {
+				if (tf->inferenceFrameReady) {
+					job = std::move(tf->inferenceJob);
+					tf->inferenceFrameReady = false;
+					haveJob = true;
+					break;
+				}
+				if (take_owned_frame_locked(tf, job)) {
+					tf->inferenceStartNs = steady_now_ns();
+					tf->isInferencing = true;
+					haveJob = true;
+					break;
+				}
+				tf->inferenceCV.wait_for(lock, std::chrono::milliseconds(4));
 			}
-
-			job = std::move(tf->inferenceJob);
-			tf->inferenceFrameReady = false;
 		}
+		if (!haveJob)
+			break;
 
 		run_model_inference(tf, std::move(job));
 	}
@@ -2412,37 +2451,6 @@ void detect_filter_video_tick(void *data, float seconds)
 	if (tf->isDisabled || !tf->modelLoaded || !obs_source_enabled(tf->source)) {
 		clear_all_buffers(tf, false);
 		return;
-	}
-
-	bool use_gpu_zero_copy = false;
-#ifdef _WIN32
-	use_gpu_zero_copy = canUseGpuZeroCopy(tf->useDirectML, tf->modelSupportsZeroCopy,
-					      tf->zeroCopyPipelineReady,
-					      tf->zeroCopyRuntimeHealthy,
-					      get_inference_frame_requirements(tf));
-#endif
-
-	if (!use_gpu_zero_copy) {
-		// The render thread writes a new Mat for every readback, so the frame can be
-		// handed to inference without a copy.
-		std::unique_lock<std::mutex> inferenceLock(tf->inferenceMutex, std::try_to_lock);
-		if (inferenceLock.owns_lock() && !tf->isInferencing && !tf->inferenceFrameReady) {
-			std::unique_lock<std::mutex> inputLock(tf->inputBGRALock, std::try_to_lock);
-			if (inputLock.owns_lock() && !tf->inputBGRA.empty() &&
-			    tf->inputBGRAFrameId > tf->lastQueuedInferenceFrameId) {
-				tf->inferenceJob.mode = InferenceMode::OwnedBGRA;
-				tf->inferenceJob.ownedBGRA = std::move(tf->inputBGRA);
-				tf->inputBGRA = cv::Mat();
-				tf->inferenceJob.sourceWidth = (uint32_t)tf->inferenceJob.ownedBGRA.cols;
-				tf->inferenceJob.sourceHeight = (uint32_t)tf->inferenceJob.ownedBGRA.rows;
-				tf->inferenceJob.frameId = tf->inputBGRAFrameId;
-				tf->lastQueuedInferenceFrameId = tf->inputBGRAFrameId;
-				tf->inferenceStartNs = steady_now_ns();
-				tf->isInferencing = true;
-				tf->inferenceFrameReady = true;
-				tf->inferenceCV.notify_one();
-			}
-		}
 	}
 
 	if (tf->trackingEnabled && tf->trackingFilter) {
@@ -3043,9 +3051,13 @@ void detect_filter_video_render(void *data, gs_effect_t *_effect)
 						copyStage.stop();
 						gs_stagesurface_unmap(staged);
 						if (!ownedFrame.empty()) {
-							std::lock_guard<std::mutex> lock(tf->inputBGRALock);
-							tf->inputBGRA = std::move(ownedFrame);
-							tf->inputBGRAFrameId = tf->stagedFrameId;
+							{
+								std::lock_guard<std::mutex> lock(
+									tf->inputBGRALock);
+								tf->inputBGRA = std::move(ownedFrame);
+								tf->inputBGRAFrameId = tf->stagedFrameId;
+							}
+							tf->inferenceCV.notify_one();
 						}
 					}
 				}

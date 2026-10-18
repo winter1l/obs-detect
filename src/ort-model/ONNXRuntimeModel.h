@@ -80,7 +80,8 @@ public:
 	virtual std::vector<Object> inference(const cv::Mat &frame) = 0;
 
 	// Size each frame is letterboxed into before inference, or an empty size when the
-	// model takes frames at their own resolution. Callers may pre-shrink frames to it.
+	// model takes frames at their own resolution. Callers may pre-shrink frames to it,
+	// and such models accept BGRA frames as well as BGR.
 	virtual cv::Size letterboxInputSize() const { return cv::Size(); }
 
 #ifdef _WIN32
@@ -104,8 +105,10 @@ protected:
 		return input_w_.empty() || input_h_.empty() ? cv::Size()
 							      : cv::Size(input_w_[0], input_h_[0]);
 	}
-	cv::Mat static_resize(const cv::Mat &img, const int input_index);
-	void blobFromImage(const cv::Mat &img, float *blob_data);
+	// Letterboxes a BGR or BGRA frame into the NCHW input blob (padding value 114),
+	// optionally swapping red and blue and scaling every value.
+	void letterboxToBlob(const cv::Mat &img, const int input_index, float *blob_data,
+			     bool swapRB = false, float scale = 1.0f);
 	void blobFromImage_nhwc(const cv::Mat &img, float *blob_data);
 	float intersection_area(const Object &a, const Object &b);
 	void qsort_descent_inplace(std::vector<Object> &faceobjects, int left, int right);

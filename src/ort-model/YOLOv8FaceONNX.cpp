@@ -21,16 +21,9 @@ std::vector<Object> YOLOv8FaceONNX::inference(const cv::Mat &frame)
 {
 	lastTimings_ = {};
 	auto stageStart = std::chrono::steady_clock::now();
-	cv::Mat rgb_frame;
-	cv::cvtColor(frame, rgb_frame, cv::COLOR_BGR2RGB);
-	cv::Mat pr_img = static_resize(rgb_frame, 0);
+	// RGB input scaled to [0, 1].
 	float *blob_data = (float *)(this->input_buffer_[0].get());
-	blobFromImage(pr_img, blob_data);
-
-	size_t input_size = input_w_[0] * input_h_[0] * 3;
-	for (size_t i = 0; i < input_size; ++i) {
-		blob_data[i] /= 255.0f;
-	}
+	letterboxToBlob(frame, 0, blob_data, true, 1.0f / 255.0f);
 
 	std::vector<const char *> input_names;
 	for (size_t i = 0; i < this->input_name_.size(); i++) {
